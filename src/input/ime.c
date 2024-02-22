@@ -49,7 +49,7 @@ static void
 text_input_v1_clear_focused_surface(struct wlr_text_input_v3 *text_input)
 {
 	if (text_input->focused_surface) {
-		wl_list_remove(&text_input->surface_destroy.link);
+		wl_list_remove(&text_input->WLR_PRIVATE.surface_destroy.link);
 	}
 	text_input->focused_surface = NULL;
 }
@@ -58,7 +58,7 @@ static void
 text_input_v1_clear_seat(struct wlr_text_input_v3 *text_input)
 {
 	if (text_input->seat) {
-		wl_list_remove(&text_input->seat_destroy.link);
+		wl_list_remove(&text_input->WLR_PRIVATE.seat_destroy.link);
 	}
 	text_input->seat = NULL;
 }
@@ -81,7 +81,7 @@ handle_text_input_v1_focused_surface_destroy(struct wl_listener *listener,
 		void *data)
 {
 	struct wlr_text_input_v3 *text_input =
-		wl_container_of(listener, text_input, surface_destroy);
+		wl_container_of(listener, text_input, WLR_PRIVATE.surface_destroy);
 	text_input_v1_clear_focused_surface(text_input);
 }
 
@@ -94,7 +94,7 @@ handle_text_input_v1_activate(struct wl_client *client,
 	struct wlr_seat_client *seat_client = wlr_seat_client_from_resource(seat);
 
 	text_input->seat = seat_client->seat;
-	wl_signal_add(&seat_client->events.destroy, &text_input->seat_destroy);
+	wl_signal_add(&seat_client->events.destroy, &text_input->WLR_PRIVATE.seat_destroy);
 
 	text_input->current_enabled = true;
 	text_input->active_features = text_input->current.features;
@@ -197,7 +197,7 @@ static void
 handle_text_input_v1_seat_destroy(struct wl_listener *listener, void *data)
 {
 	struct wlr_text_input_v3 *text_input =
-		wl_container_of(listener, text_input, seat_destroy);
+		wl_container_of(listener, text_input, WLR_PRIVATE.seat_destroy);
 	if (!text_input) {
 		return;
 	}
@@ -227,9 +227,9 @@ handle_manager_v1_create_text_input(struct wl_client *client,
 	wl_resource_set_implementation(text_input_resource, &text_input_impl,
 		text_input, handle_text_input_v1_resource_destroy);
 
-	text_input->seat_destroy.notify =
+	text_input->WLR_PRIVATE.seat_destroy.notify =
 		handle_text_input_v1_seat_destroy;
-	text_input->surface_destroy.notify =
+	text_input->WLR_PRIVATE.surface_destroy.notify =
 		handle_text_input_v1_focused_surface_destroy;
 
 	wl_list_insert(&wlr_manager_v3->text_inputs, &text_input->link);
@@ -283,7 +283,7 @@ text_input_v1_send_enter(struct wlr_text_input_v3 *text_input,
 	assert(!text_input->focused_surface);
 	text_input->focused_surface = surface;
 	wl_signal_add(&text_input->focused_surface->events.destroy,
-		&text_input->surface_destroy);
+		&text_input->WLR_PRIVATE.surface_destroy);
 	zwp_text_input_v1_send_enter(text_input->resource,
 		surface->resource);
 }
@@ -295,7 +295,6 @@ text_input_v1_send_leave(struct wlr_text_input_v3 *text_input)
 	text_input_v1_clear_focused_surface(text_input);
 	zwp_text_input_v1_send_leave(text_input->resource);
 }
-
 
 /*
  * Get keyboard grab of the seat from keyboard if we should forward events
@@ -435,7 +434,8 @@ update_text_inputs_focused_surface(struct input_method_relay *relay)
 		}
 		if (new_focused_surface) {
 			if (text_input->v1)
-				text_input_v1_send_enter(input, new_focused_surface);
+				text_input_v1_send_enter(input,
+					new_focused_surface);
 			else
 			wlr_text_input_v3_send_enter(input, new_focused_surface);
 		}
@@ -919,7 +919,7 @@ input_method_relay_create(struct seat *seat)
 	relay->focused_surface_destroy.notify = handle_focused_surface_destroy;
 
 	text_input_manager_v1_init(seat->server->wl_display,
-	seat->server->text_input_manager);
+		seat->server->text_input_manager);
 
 	return relay;
 }
