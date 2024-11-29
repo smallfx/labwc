@@ -32,6 +32,55 @@
 #include "view.h"
 #include "xwayland.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+// took this from sway hehe
+static bool read_file_into_buf(const char *path, void **buf, size_t *size) {
+	/* Why not use fopen/fread directly? glibc will succesfully open directories,
+	 * not just files, and supports seeking on them. Instead, we directly
+	 * work with file descriptors and use the more consistent open/fstat/read. */
+	int fd = open(path, O_RDONLY | O_NOCTTY);
+	if (fd == -1) {
+		return false;
+	}
+	char *b = NULL;
+	struct stat info;
+	if (fstat(fd, &info) == -1) {
+		goto fail;
+	}
+	// only regular files, to avoid issues with e.g. opening pipes
+	if (!S_ISREG(info.st_mode)) {
+		goto fail;
+	}
+	off_t s = info.st_size;
+	if (s <= 0) {
+		goto fail;
+	}
+	b = calloc(1, s);
+	if (!b) {
+		goto fail;
+	}
+	size_t nread = 0;
+	while (nread < (size_t)s) {
+		size_t to_read = (size_t)s - nread;
+		ssize_t r = read(fd, b + nread, to_read);
+		if ((r == -1 && errno != EINTR) || r == 0) {
+			goto fail;
+		}
+		nread += (size_t)r;
+	}
+	close(fd);
+	*buf = b;
+	*size = (size_t)s;
+	return true; // success
+fail:
+	free(b);
+	close(fd);
+	return false;
+}
+
 bool
 output_get_tearing_allowance(struct output *output)
 {
@@ -96,7 +145,11 @@ output_apply_gamma(struct output *output)
 		return;
 	}
 
-	if (!lab_wlr_scene_output_commit(scene_output, &pending)) {
+	struct wlr_scene_output_state_options opts = {
+		.color_transform = output->color_transform,
+	};
+
+	if (!lab_wlr_scene_output_commit(scene_output, &pending, &opts)) {
 		wlr_gamma_control_v1_send_failed_and_destroy(gamma_control);
 	}
 
@@ -148,7 +201,11 @@ output_frame_notify(struct wl_listener *listener, void *data)
 
 		pending->tearing_page_flip = output_get_tearing_allowance(output);
 
-		lab_wlr_scene_output_commit(scene_output, pending);
+		struct wlr_scene_output_state_options opts = {
+			.color_transform = output->color_transform,
+		};
+
+		lab_wlr_scene_output_commit(scene_output, pending, &opts);
 	}
 
 	struct timespec now = { 0 };
@@ -475,6 +532,37 @@ new_output_notify(struct wl_listener *listener, void *data)
 
 	configure_new_output(server, output);
 	do_output_layout_change(server);
+
+	struct wlr_color_transform *tfm = NULL;
+
+	char *homedir_path = getenv("HOME");
+	if (homedir_path == NULL) {
+		return;
+	}
+	size_t homedir_path_len = strlen(homedir_path);
+	if (homedir_path_len == 0) {
+		return;
+	}
+	char labwc_icc_dir_path[] = "/.config/labwc/icc_profiles/";
+	char icc_ext[] = ".icc";
+
+	size_t icc_path_len = homedir_path_len + strlen(labwc_icc_dir_path) + strlen(wlr_output->name) + strlen(icc_ext);
+	char icc_path[icc_path_len];
+	sprintf(icc_path, "%s%s%s%s", homedir_path, labwc_icc_dir_path, wlr_output->name, icc_ext);
+
+	void *icc_data = NULL;
+	size_t icc_size = 0;
+
+	if (read_file_into_buf(icc_path, &icc_data, &icc_size)) {
+		tfm = wlr_color_transform_init_linear_to_icc(icc_data, icc_size);
+	}
+	else {
+		wlr_log(WLR_ERROR, "No ICC profile for output \"%s\" at file path %s",
+			wlr_output->name, icc_path);
+	}
+
+	output->color_transform = tfm;
+	output->color_transform_checked = true;
 }
 
 void

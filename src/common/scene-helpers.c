@@ -80,9 +80,11 @@ scene_output_damage(struct wlr_scene_output *scene_output,
  * This is a copy of wlr_scene_output_commit()
  * as it doesn't use the pending state at all.
  */
+
 bool
 lab_wlr_scene_output_commit(struct wlr_scene_output *scene_output,
-		struct wlr_output_state *state)
+		struct wlr_output_state *state,
+		struct wlr_scene_output_state_options *opts)
 {
 	assert(scene_output);
 	assert(state);
@@ -101,7 +103,7 @@ lab_wlr_scene_output_commit(struct wlr_scene_output *scene_output,
 		return true;
 	}
 
-	if (!wlr_scene_output_build_state(scene_output, state, NULL)) {
+	if (!wlr_scene_output_build_state(scene_output, state, opts)) {
 		wlr_log(WLR_ERROR, "Failed to build output state for %s",
 			wlr_output->name);
 		return false;

@@ -12,6 +12,7 @@
 #include <wlr/backend.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/render/color.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_cursor.h>
@@ -398,6 +399,9 @@ struct output {
 	struct wlr_scene_tree *session_lock_tree;
 	struct wlr_scene_buffer *workspace_osd;
 	struct wlr_box usable_area;
+
+	struct wlr_color_transform *color_transform;
+	bool color_transform_checked;
 
 	struct wl_list regions;  /* struct region.link */
 
