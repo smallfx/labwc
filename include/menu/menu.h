@@ -12,21 +12,6 @@ struct wlr_scene_tree;
 struct wlr_scene_node;
 struct scaled_font_buffer;
 
-enum menu_align {
-	LAB_MENU_OPEN_AUTO   = 0,
-	LAB_MENU_OPEN_LEFT   = 1 << 0,
-	LAB_MENU_OPEN_RIGHT  = 1 << 1,
-	LAB_MENU_OPEN_TOP    = 1 << 2,
-	LAB_MENU_OPEN_BOTTOM = 1 << 3,
-};
-
-struct menu_scene {
-	struct wlr_scene_tree *tree;
-	struct wlr_scene_node *text;
-	struct wlr_scene_node *background;
-	struct scaled_font_buffer *buffer;
-};
-
 enum menuitem_type {
 	LAB_MENU_ITEM = 0,
 	LAB_MENU_SEPARATOR_LINE,
@@ -45,8 +30,8 @@ struct menuitem {
 	enum menuitem_type type;
 	int native_width;
 	struct wlr_scene_tree *tree;
-	struct menu_scene normal;
-	struct menu_scene selected;
+	struct wlr_scene_tree *normal_tree;
+	struct wlr_scene_tree *selected_tree;
 	struct menu_pipe_context *pipe_ctx;
 	struct view *client_list_view;  /* used by internal client-list */
 	struct wl_list link; /* menu.menuitems */
@@ -57,6 +42,7 @@ struct menu {
 	char *id;
 	char *label;
 	struct menu *parent;
+	struct menu_pipe_context *pipe_ctx;
 
 	struct {
 		int width;
@@ -70,7 +56,7 @@ struct menu {
 	} selection;
 	struct wlr_scene_tree *scene_tree;
 	bool is_pipemenu;
-	enum menu_align align;
+	bool align_left;
 
 	/* Used to match a window-menu to the view that triggered it. */
 	struct view *triggered_by_view;  /* may be NULL */

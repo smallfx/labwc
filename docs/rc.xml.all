@@ -12,8 +12,9 @@
     <gap>0</gap>
     <adaptiveSync>no</adaptiveSync>
     <allowTearing>no</allowTearing>
+    <autoEnableOutputs>yes</autoEnableOutputs>
     <reuseOutputMode>no</reuseOutputMode>
-    <xwaylandPersistence>no</xwaylandPersistence>
+    <xwaylandPersistence>yes</xwaylandPersistence>
   </core>
 
   <placement>
@@ -229,12 +230,18 @@
     your favourite terminal or application launcher. See rc.xml for an example.
   -->
   <keyboard>
-    <numlock>on</numlock>
+    <!--
+      # Numlock is not set by default
+      <numlock>on|off</numlock>
+    -->
     <layoutScope>global</layoutScope>
     <repeatRate>25</repeatRate>
     <repeatDelay>600</repeatDelay>
     <keybind key="A-Tab">
       <action name="NextWindow" />
+    </keybind>
+    <keybind key="A-S-Tab">
+      <action name="PreviousWindow" />
     </keybind>
     <keybind key="W-Return">
       <action name="Execute" command="alacritty" />
@@ -631,8 +638,9 @@
     #   - Criteria can also contain `matchOnce="true"` meaning that the rule
     #     must only apply to the first instance of the window with that
     #     particular 'identifier' or 'title'.
-    #   - Matching against patterns with '*' (wildcard) and '?' (joker) is
-    #     supported. Pattern matching is case-insensitive.
+    #   - Matching is case-insensitive and is performed using shell wildcard
+    #     patterns (see glob(7)) so '\*' (not between brackets) matches any string
+    #     and '?' matches any single character.
 
     <windowRules>
       <windowRule identifier="*"><action name="Maximize"/></windowRule>

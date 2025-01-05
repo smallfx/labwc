@@ -67,6 +67,7 @@ enum input_mode {
 	LAB_INPUT_STATE_MOVE,
 	LAB_INPUT_STATE_RESIZE,
 	LAB_INPUT_STATE_MENU,
+	LAB_INPUT_STATE_WINDOW_SWITCHER,
 };
 
 struct input {
@@ -115,6 +116,16 @@ struct seat {
 	struct {
 		double x, y;
 	} smooth_scroll_offset;
+
+	/*
+	 * The surface whose keyboard focus is temporarily cleared with
+	 * seat_focus_override_begin() and restored with
+	 * seat_focus_override_end().
+	 */
+	struct {
+		struct wlr_surface *surface;
+		struct wl_listener surface_destroy;
+	} focus_override;
 
 	struct wlr_pointer_constraint_v1 *current_constraint;
 
@@ -273,9 +284,13 @@ struct server {
 	 * 'active_view' is generally the view with keyboard-focus, updated with
 	 * each "focus change". This view is drawn with "active" SSD coloring.
 	 *
-	 * The exception is when a layer-shell client takes keyboard-focus in
-	 * which case the currently active view stays active. This is important
-	 * for foreign-toplevel protocol.
+	 * The exceptions are:
+	 * - when a layer-shell client takes keyboard-focus in which case the
+	 *   currently active view stays active
+	 * - when keyboard focus is temporarily cleared for server-side
+	 *   interactions like Move/Resize, window switcher and menus.
+	 *
+	 * Note that active_view is synced with foreign-toplevel clients.
 	 */
 	struct view *active_view;
 	/*
@@ -312,6 +327,8 @@ struct server {
 		struct workspace *last;
 		struct lab_cosmic_workspace_manager *cosmic_manager;
 		struct lab_cosmic_workspace_group *cosmic_group;
+		struct lab_ext_workspace_manager *ext_manager;
+		struct lab_ext_workspace_group *ext_group;
 		struct {
 			struct wl_listener layout_output_added;
 		} on;
@@ -371,8 +388,6 @@ struct server {
 		struct wlr_scene_tree *preview_parent;
 		struct wlr_scene_node *preview_anchor;
 		struct multi_rect *preview_outline;
-		enum lab_cycle_dir initial_direction;
-		bool initial_keybind_contained_shift;
 	} osd_state;
 
 	struct theme *theme;
@@ -398,6 +413,7 @@ struct output {
 	struct wlr_scene_tree *osd_tree;
 	struct wlr_scene_tree *session_lock_tree;
 	struct wlr_scene_buffer *workspace_osd;
+	/* In output-relative scene coordinates */
 	struct wlr_box usable_area;
 
 	struct wlr_color_transform *color_transform;
@@ -459,7 +475,6 @@ void desktop_focus_view_or_surface(struct seat *seat, struct view *view,
 
 void desktop_arrange_all_views(struct server *server);
 void desktop_focus_output(struct output *output);
-void warp_cursor(struct view *view);
 struct view *desktop_topmost_focusable_view(struct server *server);
 
 /**
@@ -467,14 +482,6 @@ struct view *desktop_topmost_focusable_view(struct server *server);
  * based on the existence of a fullscreen window on the current workspace.
  */
 void desktop_update_top_layer_visiblity(struct server *server);
-
-/**
- * desktop_cycle_view - return view to 'cycle' to
- * @start_view: reference point for finding next view to cycle to
- * Note: If !start_view, the second focusable view is returned
- */
-struct view *desktop_cycle_view(struct server *server, struct view *start_view,
-	enum lab_cycle_dir dir);
 
 /**
  * desktop_focus_topmost_view() - focus the topmost view on the current
@@ -503,6 +510,20 @@ void seat_set_focus_layer(struct seat *seat, struct wlr_layer_surface_v1 *layer)
 void seat_set_pressed(struct seat *seat, struct cursor_context *ctx);
 void seat_reset_pressed(struct seat *seat);
 void seat_output_layout_changed(struct seat *seat);
+
+/*
+ * Temporarily clear the pointer/keyboard focus from the client at the
+ * beginning of interactive move/resize, window switcher or menu interactions.
+ * The focus is kept cleared until seat_focus_override_end() is called or
+ * layer-shell/session-lock surfaces are mapped.
+ */
+void seat_focus_override_begin(struct seat *seat, enum input_mode input_mode,
+	enum lab_cursors cursor_shape);
+/*
+ * Restore the pointer/keyboard focus which was cleared in
+ * seat_focus_override_begin().
+ */
+void seat_focus_override_end(struct seat *seat);
 
 /**
  * interactive_anchor_to_cursor() - repositions the geometry to remain
@@ -548,7 +569,6 @@ void output_update_usable_area(struct output *output);
 void output_update_all_usable_areas(struct server *server, bool layout_changed);
 bool output_get_tearing_allowance(struct output *output);
 struct wlr_box output_usable_area_in_layout_coords(struct output *output);
-struct wlr_box output_usable_area_scaled(struct output *output);
 void handle_output_power_manager_set_mode(struct wl_listener *listener,
 	void *data);
 void output_enable_adaptive_sync(struct output *output, bool enabled);

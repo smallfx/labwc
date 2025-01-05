@@ -28,6 +28,7 @@
 #include "output-state.h"
 #include "output-virtual.h"
 #include "protocols/cosmic-workspaces.h"
+#include "protocols/ext-workspace.h"
 #include "regions.h"
 #include "view.h"
 #include "xwayland.h"
@@ -305,13 +306,6 @@ output_request_state_notify(struct wl_listener *listener, void *data)
 
 static void do_output_layout_change(struct server *server);
 
-static bool
-can_reuse_mode(struct output *output)
-{
-	struct wlr_output *wo = output->wlr_output;
-	return wo->current_mode && wlr_output_test_state(wo, &output->pending);
-}
-
 static void
 add_output_to_layout(struct server *server, struct output *output)
 {
@@ -341,6 +335,8 @@ add_output_to_layout(struct server *server, struct output *output)
 
 	lab_cosmic_workspace_group_output_enter(
 		server->workspaces.cosmic_group, output->wlr_output);
+	lab_ext_workspace_group_output_enter(
+		server->workspaces.ext_group, output->wlr_output);
 
 	/* (Re-)create regions from config */
 	regions_reconfigure_output(output);
@@ -351,26 +347,61 @@ add_output_to_layout(struct server *server, struct output *output)
 	}
 }
 
-static void
-configure_new_output(struct server *server, struct output *output)
+static bool
+output_test_auto(struct wlr_output *wlr_output, struct wlr_output_state *state,
+		bool is_client_request)
 {
-	struct wlr_output *wlr_output = output->wlr_output;
-
-	wlr_log(WLR_DEBUG, "enable output");
-	wlr_output_state_set_enabled(&output->pending, true);
+	wlr_log(WLR_DEBUG, "testing modes for %s", wlr_output->name);
+	/*
+	 * When a client requests a specific mode, test only that mode. Here
+	 * we interpret a custom_mode of all zeroes as "none/any"; this is
+	 * seen e.g. with kanshi configs containing no "mode" field. In
+	 * theory, (state->committed & WLR_OUTPUT_STATE_MODE) should be zero
+	 * in this case, but this is not seen in practice.
+	 *
+	 * If the wlr_output_state did not come from a client request, then
+	 * ignore the mode/custom_mode fields which are not meaningful.
+	 */
+	if (is_client_request && (state->mode
+			|| state->custom_mode.width
+			|| state->custom_mode.height
+			|| state->custom_mode.refresh)) {
+		if (state->mode) {
+			wlr_log(WLR_DEBUG, "testing requested mode %dx%d@%d",
+				state->mode->width, state->mode->height,
+				state->mode->refresh);
+		} else {
+			wlr_log(WLR_DEBUG, "testing custom mode %dx%d@%d",
+				state->custom_mode.width,
+				state->custom_mode.height,
+				state->custom_mode.refresh);
+		}
+		return wlr_output_test_state(wlr_output, state);
+	}
 
 	/*
 	 * Try to re-use the existing mode if configured to do so.
 	 * Failing that, try to set the preferred mode.
 	 */
-	struct wlr_output_mode *preferred_mode = NULL;
-	if (!rc.reuse_output_mode || !can_reuse_mode(output)) {
-		wlr_log(WLR_DEBUG, "set preferred mode");
-		/* The mode is a tuple of (width, height, refresh rate). */
-		preferred_mode = wlr_output_preferred_mode(wlr_output);
-		if (preferred_mode) {
-			wlr_output_state_set_mode(&output->pending,
-				preferred_mode);
+	if (rc.reuse_output_mode && wlr_output->current_mode) {
+		wlr_log(WLR_DEBUG, "testing current mode %dx%d@%d",
+			wlr_output->current_mode->width,
+			wlr_output->current_mode->height,
+			wlr_output->current_mode->refresh);
+		if (wlr_output_test_state(wlr_output, state)) {
+			return true;
+		}
+	}
+
+	struct wlr_output_mode *preferred_mode =
+		wlr_output_preferred_mode(wlr_output);
+	if (preferred_mode) {
+		wlr_log(WLR_DEBUG, "testing preferred mode %dx%d@%d",
+			preferred_mode->width, preferred_mode->height,
+			preferred_mode->refresh);
+		wlr_output_state_set_mode(state, preferred_mode);
+		if (wlr_output_test_state(wlr_output, state)) {
+			return true;
 		}
 	}
 
@@ -380,19 +411,40 @@ configure_new_output(struct server *server, struct output *output)
 	 * cases it's better to fallback to lower modes than to end up with
 	 * a black screen. See sway@4cdc4ac6
 	 */
-	if (!wlr_output_test_state(wlr_output, &output->pending)) {
-		wlr_log(WLR_DEBUG,
-			"preferred mode rejected, falling back to another mode");
-		struct wlr_output_mode *mode;
-		wl_list_for_each(mode, &wlr_output->modes, link) {
-			if (mode == preferred_mode) {
-				continue;
-			}
-			wlr_output_state_set_mode(&output->pending, mode);
-			if (wlr_output_test_state(wlr_output, &output->pending)) {
-				break;
-			}
+	struct wlr_output_mode *mode;
+	wl_list_for_each(mode, &wlr_output->modes, link) {
+		if (mode == preferred_mode) {
+			continue;
 		}
+		wlr_log(WLR_DEBUG, "testing fallback mode %dx%d@%d",
+			mode->width, mode->height, mode->refresh);
+		wlr_output_state_set_mode(state, mode);
+		if (wlr_output_test_state(wlr_output, state)) {
+			return true;
+		}
+	}
+
+	/* Reset mode if none worked (we may still try to commit) */
+	wlr_output_state_set_mode(state, NULL);
+	return false;
+}
+
+static void
+configure_new_output(struct server *server, struct output *output)
+{
+	struct wlr_output *wlr_output = output->wlr_output;
+
+	wlr_log(WLR_DEBUG, "enable output %s", wlr_output->name);
+	wlr_output_state_set_enabled(&output->pending, true);
+
+	if (!output_test_auto(wlr_output, &output->pending,
+			/* is_client_request */ false)) {
+		wlr_log(WLR_INFO, "mode test failed for output %s",
+			wlr_output->name);
+		/*
+		 * Continue anyway. For some reason, the test fails when
+		 * running nested, yet the following commit succeeds.
+		 */
 	}
 
 	if (rc.adaptive_sync == LAB_ADAPTIVE_SYNC_ENABLED) {
@@ -516,6 +568,7 @@ new_output_notify(struct wl_listener *listener, void *data)
 	 * Set the z-positions to achieve the following order (from top to
 	 * bottom):
 	 *	- session lock layer
+	 *	- compositor menu
 	 *	- layer-shell popups
 	 *	- overlay layer
 	 *	- top layer
@@ -528,9 +581,13 @@ new_output_notify(struct wl_listener *listener, void *data)
 	wlr_scene_node_raise_to_top(&output->layer_tree[2]->node);
 	wlr_scene_node_raise_to_top(&output->layer_tree[3]->node);
 	wlr_scene_node_raise_to_top(&output->layer_popup_tree->node);
+	wlr_scene_node_raise_to_top(&server->menu_tree->node);
 	wlr_scene_node_raise_to_top(&output->session_lock_tree->node);
 
-	configure_new_output(server, output);
+	if (rc.auto_enable_outputs) {
+		configure_new_output(server, output);
+	}
+
 	do_output_layout_change(server);
 
 	struct wlr_color_transform *tfm = NULL;
@@ -627,8 +684,6 @@ output_config_apply(struct server *server,
 		struct output *output = output_from_wlr_output(server, o);
 		struct wlr_output_state *os = &output->pending;
 		bool output_enabled = head->state.enabled && !output->leased;
-		bool need_to_add = output_enabled && !o->enabled;
-		bool need_to_remove = !output_enabled && o->enabled;
 
 		wlr_output_state_set_enabled(os, output_enabled);
 		if (output_enabled) {
@@ -641,6 +696,12 @@ output_config_apply(struct server *server,
 					head->state.custom_mode.height,
 					head->state.custom_mode.refresh);
 			}
+			/*
+			 * Try to ensure a valid mode. Ignore failures
+			 * here and just check the commit below.
+			 */
+			(void)output_test_auto(o, os,
+				/* is_client_request */ true);
 			wlr_output_state_set_scale(os, head->state.scale);
 			wlr_output_state_set_transform(os, head->state.transform);
 			output_enable_adaptive_sync(output,
@@ -658,12 +719,19 @@ output_config_apply(struct server *server,
 			break;
 		}
 
-		/* Only do Layout specific actions if the commit went trough */
-		if (need_to_add) {
-			add_output_to_layout(server, output);
-		}
+		/*
+		 * Add or remove output from layout only if the commit went
+		 * through. Note that at startup, the output may have already
+		 * been enabled but not yet been added to the layout.
+		 */
+		bool was_in_layout =
+			!!wlr_output_layout_get(server->output_layout, o);
 
 		if (output_enabled) {
+			if (!was_in_layout) {
+				add_output_to_layout(server, output);
+			}
+
 			struct wlr_box pos = {0};
 			wlr_output_layout_get_box(server->output_layout, o, &pos);
 			if (pos.x != head->state.x || pos.y != head->state.y) {
@@ -675,13 +743,13 @@ output_config_apply(struct server *server,
 				wlr_output_layout_add(server->output_layout, o,
 					head->state.x, head->state.y);
 			}
-		}
-
-		if (need_to_remove) {
+		} else if (was_in_layout) {
 			regions_evacuate_output(output);
 
 			lab_cosmic_workspace_group_output_leave(
 				server->workspaces.cosmic_group, output->wlr_output);
+			lab_ext_workspace_group_output_leave(
+				server->workspaces.ext_group, output->wlr_output);
 
 			/*
 			 * At time of writing, wlr_output_layout_remove()
@@ -715,21 +783,6 @@ verify_output_config_v1(const struct wlr_output_configuration_v1 *config)
 		/* Handle custom modes */
 		if (!head->state.mode) {
 			int32_t refresh = head->state.custom_mode.refresh;
-
-			if (wlr_output_is_drm(head->state.output) && refresh == 0) {
-				/*
-				 * wlroots has a bug which causes a divide by zero
-				 * when setting the refresh rate to 0 on a DRM output.
-				 * It is already fixed but not part of an official 0.17.x
-				 * release. Even it would be we still need to carry the
-				 * fix here to prevent older 0.17.x releases from crashing.
-				 *
-				 * https://gitlab.freedesktop.org/wlroots/wlroots/-/issues/3791
-				 */
-				err_msg = "DRM backend does not support a refresh rate of 0";
-				goto custom_mode_failed;
-			}
-
 			if (wlr_output_is_wl(head->state.output) && refresh != 0) {
 				/* Wayland backend does not support refresh rates */
 				err_msg = "Wayland backend refresh rates unsupported";
@@ -755,7 +808,8 @@ verify_output_config_v1(const struct wlr_output_configuration_v1 *config)
 		wlr_output_state_init(&output_state);
 		wlr_output_head_v1_state_apply(&head->state, &output_state);
 
-		if (!wlr_output_test_state(head->state.output, &output_state)) {
+		if (!output_test_auto(head->state.output, &output_state,
+				/* is_client_request */ true)) {
 			wlr_output_state_finish(&output_state);
 			return false;
 		}
@@ -1087,24 +1141,6 @@ output_usable_area_in_layout_coords(struct output *output)
 	box.x -= ox;
 	box.y -= oy;
 	return box;
-}
-
-struct wlr_box
-output_usable_area_scaled(struct output *output)
-{
-	if (!output) {
-		return (struct wlr_box){0};
-	}
-	struct wlr_box usable = output_usable_area_in_layout_coords(output);
-	if (usable.height == output->wlr_output->height
-			&& output->wlr_output->scale != 1) {
-		usable.height /= output->wlr_output->scale;
-	}
-	if (usable.width == output->wlr_output->width
-			&& output->wlr_output->scale != 1) {
-		usable.width /= output->wlr_output->scale;
-	}
-	return usable;
 }
 
 void

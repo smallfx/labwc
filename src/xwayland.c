@@ -402,7 +402,7 @@ handle_request_activate(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	if (view->server->osd_state.cycle_view) {
+	if (view->server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
 		wlr_log(WLR_INFO, "Preventing focus request while in window switcher");
 		return;
 	}
@@ -485,10 +485,10 @@ xwayland_view_get_string_prop(struct view *view, const char *prop)
 	}
 
 	if (!strcmp(prop, "title")) {
-		return xwayland_surface->title;
+		return xwayland_surface->title ? xwayland_surface->title : "";
 	}
 	if (!strcmp(prop, "class")) {
-		return xwayland_surface->class;
+		return xwayland_surface->class ? xwayland_surface->class : "";
 	}
 	/*
 	 * Use the WM_CLASS 'instance' (1st string) for the app_id. Per
@@ -500,7 +500,7 @@ xwayland_view_get_string_prop(struct view *view, const char *prop)
 	 * here since we use the app_id for icon lookups.
 	 */
 	if (!strcmp(prop, "app_id")) {
-		return xwayland_surface->instance;
+		return xwayland_surface->instance ? xwayland_surface->instance : "";
 	}
 	return "";
 }
@@ -735,7 +735,7 @@ xwayland_view_map(struct view *view)
 			wl_resource_post_no_memory(view->surface->resource);
 			return;
 		}
-		view->scene_node = &tree->node;
+		view->content_node = &tree->node;
 	}
 
 	/*

@@ -496,7 +496,8 @@ cursor_update_common(struct server *server, struct cursor_context *ctx,
 	if (server->input_mode != LAB_INPUT_STATE_PASSTHROUGH) {
 		/*
 		 * Prevent updating focus/cursor image during
-		 * interactive move/resize
+		 * interactive move/resize, window switcher and
+		 * menu interaction.
 		 */
 		return false;
 	}
@@ -524,28 +525,9 @@ cursor_update_common(struct server *server, struct cursor_context *ctx,
 		 * cursor image will be set by request_cursor_notify()
 		 * in response to the enter event.
 		 */
-		bool has_focus = (ctx->surface ==
-			wlr_seat->pointer_state.focused_surface);
-
-		if (!has_focus || seat->server_cursor != LAB_CURSOR_CLIENT) {
-			/*
-			 * Enter the surface if necessary.  Usually we
-			 * prevent re-entering an already focused
-			 * surface, because the extra leave and enter
-			 * events can confuse clients (e.g. break
-			 * double-click detection).
-			 *
-			 * We do however send a leave/enter event pair
-			 * if a server-side cursor was set and we need
-			 * to trigger a cursor image update.
-			 */
-			if (has_focus) {
-				wlr_seat_pointer_notify_clear_focus(wlr_seat);
-			}
-			wlr_seat_pointer_notify_enter(wlr_seat, ctx->surface,
-				ctx->sx, ctx->sy);
-			seat->server_cursor = LAB_CURSOR_CLIENT;
-		}
+		wlr_seat_pointer_notify_enter(wlr_seat, ctx->surface,
+			ctx->sx, ctx->sy);
+		seat->server_cursor = LAB_CURSOR_CLIENT;
 		if (cursor_has_moved) {
 			*sx = ctx->sx;
 			*sy = ctx->sy;
@@ -614,7 +596,8 @@ cursor_process_motion(struct server *server, uint32_t time, double *sx, double *
 	}
 
 	if ((ctx.view || ctx.surface) && rc.focus_follow_mouse
-			&& !server->osd_state.cycle_view) {
+			&& server->input_mode
+				!= LAB_INPUT_STATE_WINDOW_SWITCHER) {
 		desktop_focus_view_or_surface(seat, ctx.view, ctx.surface,
 			rc.raise_on_focus);
 	}
@@ -654,9 +637,11 @@ _cursor_update_focus(struct server *server)
 	struct cursor_context ctx = get_cursor_context(server);
 
 	if ((ctx.view || ctx.surface) && rc.focus_follow_mouse
-			&& !rc.focus_follow_mouse_requires_movement
-			&& !server->osd_state.cycle_view) {
-		/* Prevents changing keyboard focus during A-Tab */
+			&& !rc.focus_follow_mouse_requires_movement) {
+		/*
+		 * Always focus the surface below the cursor when
+		 * followMouse=yes and followMouseRequiresMovement=no.
+		 */
 		desktop_focus_view_or_surface(&server->seat, ctx.view,
 			ctx.surface, rc.raise_on_focus);
 	}
@@ -901,7 +886,7 @@ static void
 handle_release_mousebinding(struct server *server,
 		struct cursor_context *ctx, uint32_t button)
 {
-	if (server->osd_state.cycle_view) {
+	if (server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
 		return;
 	}
 
@@ -968,7 +953,7 @@ static bool
 handle_press_mousebinding(struct server *server, struct cursor_context *ctx,
 		uint32_t button)
 {
-	if (server->osd_state.cycle_view) {
+	if (server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
 		return false;
 	}
 
@@ -1118,9 +1103,7 @@ cursor_process_button_release(struct seat *seat, uint32_t button,
 				menu_call_selected_actions(server);
 			} else {
 				menu_close_root(server);
-				double sx, sy;
-				cursor_update_common(server, &ctx, time_msec,
-					/*cursor_has_moved*/ false, &sx, &sy);
+				cursor_update_focus(server);
 			}
 		}
 		return notify;

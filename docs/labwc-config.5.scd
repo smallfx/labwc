@@ -171,7 +171,9 @@ this is for compatibility with Openbox.
   <gap>0</gap>
   <adaptiveSync>no</adaptiveSync>
   <allowTearing>no</allowTearing>
+  <autoEnableOutputs>yes</autoEnableOutputs>
   <reuseOutputMode>no</reuseOutputMode>
+  <xwaylandPersistence>yes</xwaylandPersistence>
 </core>
 ```
 
@@ -208,6 +210,14 @@ this is for compatibility with Openbox.
 	consider setting the environment variable WLR_DRM_NO_ATOMIC=1 when
 	launching labwc.
 
+*<core><autoEnableOutputs>* [yes|no]
+	Automatically enable outputs at startup and when new outputs are
+	connected. Default is yes.
+
+	Caution: Disabling this option will make the labwc session unusable
+	unless an external tool such as `wlr-randr` or `kanshi` is used to
+	manage outputs.
+
 *<core><reuseOutputMode>* [yes|no]
 	Try to re-use the existing output mode (resolution / refresh rate).
 	This may prevent unnecessary screenblank delays when starting labwc
@@ -218,30 +228,53 @@ this is for compatibility with Openbox.
 *<core><xwaylandPersistence>* [yes|no]
 	Keep XWayland alive even when no clients are connected, rather than
 	using a "lazy" policy that allows the server to launch on demand and die
-	when it is no longer needed. Default is no.
+	when it is no longer needed.
+
+	When labwc is compiled with wlroots 0.18.2 or later, the default is no.
+	When labwc is compiled with wlroots < 0.18.2, the default is yes to
+	avoid a wlroots bug that can result in compositor crashes when
+	performing drag-and-drop actions when the XWayland server is shut down.
 
 	Note: changing this setting requires a restart of labwc.
 
 ## PLACEMENT
 
+```
+<placement>
+  <policy>cascade</policy>
+  <cascadeOffset x="40" y="30" />
+</placement>
+```
+
 *<placement><policy>* [center|automatic|cursor|cascade]
 	Specify a placement policy for new windows. The "center" policy will
 	always place windows at the center of the active output. The "automatic"
-	policy will try to place new windows in such a way that they will
-	have minimal overlap with existing windows. The "cursor" policy will
-	center new windows under the cursor. The "cascade" policy will try to
-	place new windows at the center of the active output, but possibly
-	shifts its position to bottom-right not to cover existing windows.
-	Default is "cascade".
+	policy will try to place new windows in such a way that they will have
+	minimal overlap with existing windows. The "cursor" policy will center
+	new windows under the cursor. The "cascade" policy will try to place new
+	windows at the center of the active output, but possibly shifts its
+	position to bottom-right not to cover existing windows. Default is
+	"cascade".
 
 *<placement><cascadeOffset><x>*++
 *<placement><cascadeOffset><y>*
 	Specify the offset by which a new window can be shifted from an existing
-	window when <placement><policy> is "cascade". These values must be positive.
-	Default is the height of titlebar (the sum of *titlebar.height* and
-	*border.width* from theme) plus 5 for both *x* and *y*.
+	window when <placement><policy> is "cascade". These values must be
+	positive. Default is the height of titlebar (the sum of
+	*titlebar.height* and *border.width* from theme) plus 5 for both *x* and
+	*y*.
 
 ## WINDOW SWITCHER
+
+```
+<windowSwitcher show="yes" preview="yes" outlines="yes" allWorkspaces="no">
+  <fields>
+    <field content="type" width="25%"/>
+    <field content="trimmed_identifier" width="25%"/>
+    <field content="title" width="50%"/>
+  </fields>
+</windowSwitcher>
+```
 
 *<windowSwitcher show="" preview="" outlines="" allWorkspaces="">*
 	*show* [yes|no] Draw the OnScreenDisplay when switching between
@@ -541,7 +574,7 @@ extending outward from the snapped edge.
 
 *<keyboard><numlock>* [on|off]
 	When recognizing a new keyboard enable or disable Num Lock.
-	Default is on.
+	Default is unset.
 
 *<keyboard layoutScope="">* [global|window]
 	Stores the keyboard layout either globally or per window and restores
@@ -564,6 +597,25 @@ extending outward from the snapped edge.
 	are not supported. The application "wev" (wayland event viewer) is
 	packaged in a lot of distributions and can be used to view all available
 	keynames.
+
+	When matching against keybinds, input keys are processed in the
+	following order of precedence:
+	- Keycodes of physical keys (except if keybind is layoutDependent)
+	- Translated keysyms taking into account modifiers (so if Shift+1 were
+	  pressed on a us keyboard, the keysym would be '!')
+	- Raw keysyms ignoring modifiers such as shift (so in the above example
+	  the keysym would just be '1')
+
+	The reasons for this approach are:
+	- To make keybinds keyboard-layout agnostic (by checking keycodes before
+	  keysyms). This means that in a multi-layout situation, keybinds work
+	  regardless of which layout is active at the time of the key-press.
+	- To support keybinds relating to keysyms that are only available in a
+	  particular layout, for example å, ä and ö.
+	- To support keybinds that are only valid with a modifier, for example
+	  the numpad keys with NumLock enabled: KP_x. These would only be
+	  matched by the translated keysyms.
+	- To support keybinds such as `S-1` (by checking raw keysyms).
 
 	*layoutDependent* [yes|no]
 	Make this specific keybind depend on the currently active keyboard
@@ -605,12 +657,14 @@ extending outward from the snapped edge.
 
 ```
   A-Tab - next window
+  A-S-Tab - previous window
   W-Return - alacritty
   A-F3 - run bemenu
   A-F4 - close window
   W-a - toggle maximize
   A-<arrow> - move window to edge
   W-<arrow> - resize window to fill half the output
+  A-Space - show window menu
 ```
 
 	Audio and MonBrightness keys are also bound to amixer and
@@ -999,8 +1053,9 @@ sandboxAppId="" type="" matchOnce="">*
 	Define a window rule for any window which matches the criteria defined
 	by the attributes *identifier*, *title*, or *type*. If more than one
 	is defined, AND logic is used, so all have to match.
-	Matching against patterns with '\*' (wildcard) and '?' (joker) is
-	supported. Pattern matching is case-insensitive.
+	Matching is case-insensitive and is performed using shell wildcard
+	patterns (see glob(7)) so '\*' (not between brackets) matches any string
+	and '?' matches any single character.
 
 	*identifier* relates to app_id for native Wayland windows and WM_CLASS
 	for XWayland clients.
@@ -1054,18 +1109,6 @@ situation.
 	re-positioning in response to changes in reserved output space, which
 	can be caused by *<margin>* settings or exclusive layer-shell clients
 	such as panels.
-
-*<windowRules><windowRule wantAbsorbedModifierReleaseEvents="">* [yes|no|default]
-	*wantAbsorbedModifierReleaseEvents* allows clients to receive modifier
-	release events even if they are part of keybinds. Most clients should
-	not receive these, but some (for example blender) need it in some
-	situations.
-
-```
-<windowRules>
-  <windowRule identifier="blender" wantAbsorbedModifierReleaseEvents="yes"/>
-</windowRules>
-```
 
 ## MENU
 

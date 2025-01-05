@@ -14,6 +14,7 @@
 #include <wayland-server-core.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
+#include <wlr/version.h>
 #include "action.h"
 #include "common/dir.h"
 #include "common/list.h"
@@ -23,6 +24,7 @@
 #include "common/parse-bool.h"
 #include "common/parse-double.h"
 #include "common/string-helpers.h"
+#include "common/three-state.h"
 #include "config/default-bindings.h"
 #include "config/keybind.h"
 #include "config/libinput.h"
@@ -35,6 +37,9 @@
 #include "view.h"
 #include "window-rules.h"
 #include "workspaces.h"
+
+#define LAB_WLR_VERSION_OLDER_THAN(major, minor, micro) \
+	(WLR_VERSION_NUM < (((major) << 16) | ((minor) << 8) | (micro)))
 
 static bool in_regions;
 static bool in_usable_area_override;
@@ -354,8 +359,6 @@ fill_window_rule(char *nodename, char *content)
 		set_property(content, &current_window_rule->ignore_configure_request);
 	} else if (!strcasecmp(nodename, "fixedPosition")) {
 		set_property(content, &current_window_rule->fixed_position);
-	} else if (!strcasecmp(nodename, "wantAbsorbedModifierReleaseEvents")) {
-		set_property(content, &current_window_rule->want_absorbed_modifier_release_events);
 
 	/* Actions */
 	} else if (!strcmp(nodename, "name.action")) {
@@ -646,7 +649,14 @@ fill_touch(char *nodename, char *content)
 	if (!strcasecmp(nodename, "touch")) {
 		current_touch = znew(*current_touch);
 		wl_list_append(&rc.touch_configs, &current_touch->link);
-	} else if (!strcasecmp(nodename, "deviceName.touch")) {
+		return;
+	}
+
+	if (!content) {
+		return;
+	}
+
+	if (!strcasecmp(nodename, "deviceName.touch")) {
 		xstrdup_replace(current_touch->device_name, content);
 	} else if (!strcasecmp(nodename, "mapToOutput.touch")) {
 		xstrdup_replace(current_touch->output_name, content);
@@ -1072,6 +1082,8 @@ entry(xmlNode *node, char *nodename, char *content)
 		set_adaptive_sync_mode(content, &rc.adaptive_sync);
 	} else if (!strcasecmp(nodename, "allowTearing.core")) {
 		set_tearing_mode(content, &rc.allow_tearing);
+	} else if (!strcasecmp(nodename, "autoEnableOutputs.core")) {
+		set_bool(content, &rc.auto_enable_outputs);
 	} else if (!strcasecmp(nodename, "reuseOutputMode.core")) {
 		set_bool(content, &rc.reuse_output_mode);
 	} else if (!strcmp(nodename, "policy.placement")) {
@@ -1081,6 +1093,15 @@ entry(xmlNode *node, char *nodename, char *content)
 		}
 	} else if (!strcasecmp(nodename, "xwaylandPersistence.core")) {
 		set_bool(content, &rc.xwayland_persistence);
+
+#if LAB_WLR_VERSION_OLDER_THAN(0, 18, 2)
+		if (!rc.xwayland_persistence) {
+			wlr_log(WLR_ERROR, "to avoid the risk of a fatal crash, "
+				"setting xwaylandPersistence to 'no' is only "
+				"recommended when labwc is compiled against "
+				"wlroots >= 0.18.2. See #2371 for details.");
+		}
+#endif
 	} else if (!strcasecmp(nodename, "x.cascadeOffset.placement")) {
 		rc.placement_cascade_offset_x = atoi(content);
 	} else if (!strcasecmp(nodename, "y.cascadeOffset.placement")) {
@@ -1132,7 +1153,10 @@ entry(xmlNode *node, char *nodename, char *content)
 	} else if (!strcasecmp(nodename, "repeatDelay.keyboard")) {
 		rc.repeat_delay = atoi(content);
 	} else if (!strcasecmp(nodename, "numlock.keyboard")) {
-		set_bool(content, &rc.kb_numlock_enable);
+		bool value;
+		set_bool(content, &value);
+		rc.kb_numlock_enable = value ? LAB_STATE_ENABLED
+			: LAB_STATE_DISABLED;
 	} else if (!strcasecmp(nodename, "layoutScope.keyboard")) {
 		/*
 		 * This can be changed to an enum later on
@@ -1392,7 +1416,8 @@ xml_tree_walk(xmlNode *node)
 void
 rcxml_parse_xml(struct buf *b)
 {
-	xmlDoc *d = xmlParseMemory(b->data, b->len);
+	int options = 0;
+	xmlDoc *d = xmlReadMemory(b->data, b->len, NULL, NULL, options);
 	if (!d) {
 		wlr_log(WLR_ERROR, "error parsing config file");
 		return;
@@ -1444,8 +1469,18 @@ rcxml_init(void)
 	rc.gap = 0;
 	rc.adaptive_sync = LAB_ADAPTIVE_SYNC_DISABLED;
 	rc.allow_tearing = false;
+	rc.auto_enable_outputs = true;
 	rc.reuse_output_mode = false;
+
+#if LAB_WLR_VERSION_OLDER_THAN(0, 18, 2)
+	/*
+	 * For wlroots < 0.18.2, keep xwayland alive by default to work around
+	 * a fatal crash when the X server is terminated during drag-and-drop.
+	 */
+	rc.xwayland_persistence = true;
+#else
 	rc.xwayland_persistence = false;
+#endif
 
 	init_font_defaults(&rc.font_activewindow);
 	init_font_defaults(&rc.font_inactivewindow);
@@ -1469,7 +1504,7 @@ rcxml_init(void)
 
 	rc.repeat_rate = 25;
 	rc.repeat_delay = 600;
-	rc.kb_numlock_enable = true;
+	rc.kb_numlock_enable = LAB_STATE_UNSPECIFIED;
 	rc.kb_layout_per_window = false;
 	rc.screen_edge_strength = 20;
 	rc.window_edge_strength = 20;

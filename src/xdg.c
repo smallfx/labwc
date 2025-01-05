@@ -660,10 +660,10 @@ xdg_toplevel_view_get_string_prop(struct view *view, const char *prop)
 	}
 
 	if (!strcmp(prop, "title")) {
-		return xdg_toplevel->title;
+		return xdg_toplevel->title ? xdg_toplevel->title : "";
 	}
 	if (!strcmp(prop, "app_id")) {
-		return xdg_toplevel->app_id;
+		return xdg_toplevel->app_id ? xdg_toplevel->app_id : "";
 	}
 	return "";
 }
@@ -874,7 +874,7 @@ xdg_activation_handle_request(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	if (view->server->osd_state.cycle_view) {
+	if (view->server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
 		wlr_log(WLR_INFO, "Preventing focus request while in window switcher");
 		return;
 	}
@@ -933,7 +933,7 @@ xdg_toplevel_new(struct wl_listener *listener, void *data)
 		free(xdg_toplevel_view);
 		return;
 	}
-	view->scene_node = &tree->node;
+	view->content_node = &tree->node;
 	node_descriptor_create(&view->scene_tree->node,
 		LAB_NODE_DESC_VIEW, view);
 

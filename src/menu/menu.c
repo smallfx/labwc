@@ -9,6 +9,7 @@
 #include <string.h>
 #include <strings.h>
 #include <wayland-server-core.h>
+#include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include "action.h"
 #include "common/buf.h"
@@ -47,6 +48,7 @@ static struct menuitem *selected_item;
 struct menu_pipe_context {
 	struct server *server;
 	struct menuitem *item;
+	struct menu *top_level_menu;
 	struct buf buf;
 	struct wl_event_source *event_read;
 	struct wl_event_source *event_timeout;
@@ -151,6 +153,52 @@ item_create(struct menu *menu, const char *text, bool show_arrow)
 	return menuitem;
 }
 
+static struct wlr_scene_tree *
+item_create_scene_for_state(struct menuitem *item, float *text_color,
+	float *bg_color)
+{
+	struct menu *menu = item->parent;
+	struct theme *theme = menu->server->theme;
+
+	/* Tree to hold background and label buffers */
+	struct wlr_scene_tree *tree = wlr_scene_tree_create(item->tree);
+
+	/* Create background */
+	int bg_width = menu->size.width
+		- 2 * theme->menu_border_width;
+	wlr_scene_rect_create(tree, bg_width, theme->menu_item_height, bg_color);
+
+	int arrow_width = item->arrow ?
+		font_width(&rc.font_menuitem, item->arrow) : 0;
+	int label_max_width = bg_width - 2 * theme->menu_items_padding_x - arrow_width;
+
+	/* Create label */
+	struct scaled_font_buffer *label_buffer = scaled_font_buffer_create(tree);
+	assert(label_buffer);
+	scaled_font_buffer_update(label_buffer, item->text, label_max_width,
+		&rc.font_menuitem, text_color, bg_color);
+	/* Vertically center and left-align label */
+	int x = theme->menu_items_padding_x;
+	int y = (theme->menu_item_height - label_buffer->height) / 2;
+	wlr_scene_node_set_position(&label_buffer->scene_buffer->node, x, y);
+
+	if (!item->arrow) {
+		return tree;
+	}
+
+	/* Create arrow for submenu items */
+	struct scaled_font_buffer *arrow_buffer = scaled_font_buffer_create(tree);
+	assert(arrow_buffer);
+	scaled_font_buffer_update(arrow_buffer, item->arrow, -1,
+		&rc.font_menuitem, text_color, bg_color);
+	/* Vertically center and right-align arrow */
+	x += label_max_width;
+	y = (theme->menu_item_height - label_buffer->height) / 2;
+	wlr_scene_node_set_position(&arrow_buffer->scene_buffer->node, x, y);
+
+	return tree;
+}
+
 static void
 item_create_scene(struct menuitem *menuitem, int *item_y)
 {
@@ -164,49 +212,15 @@ item_create_scene(struct menuitem *menuitem, int *item_y)
 	node_descriptor_create(&menuitem->tree->node,
 		LAB_NODE_DESC_MENUITEM, menuitem);
 
-	/* Tree for each state to hold background and text buffer */
-	menuitem->normal.tree = wlr_scene_tree_create(menuitem->tree);
-	menuitem->selected.tree = wlr_scene_tree_create(menuitem->tree);
-	/* Hide selected state */
-	wlr_scene_node_set_enabled(&menuitem->selected.tree->node, false);
-
-	int bg_width = menu->size.width
-		- 2 * theme->menu_border_width;
-
-	/* Item background nodes */
-	menuitem->normal.background = &wlr_scene_rect_create(
-		menuitem->normal.tree,
-		bg_width, theme->menu_item_height,
-		theme->menu_items_bg_color)->node;
-	menuitem->selected.background = &wlr_scene_rect_create(
-		menuitem->selected.tree,
-		bg_width, theme->menu_item_height,
-		theme->menu_items_active_bg_color)->node;
-
-	/* Font nodes */
-	menuitem->normal.buffer = scaled_font_buffer_create(menuitem->normal.tree);
-	menuitem->selected.buffer = scaled_font_buffer_create(menuitem->selected.tree);
-	assert(menuitem->normal.buffer && menuitem->selected.buffer);
-	menuitem->normal.text = &menuitem->normal.buffer->scene_buffer->node;
-	menuitem->selected.text = &menuitem->selected.buffer->scene_buffer->node;
-
-	/* Font buffers */
-	int text_width = bg_width - 2 * theme->menu_items_padding_x;
-	scaled_font_buffer_update(menuitem->normal.buffer, menuitem->text,
-		text_width, &rc.font_menuitem,
+	/* Create scenes for unselected/selected states */
+	menuitem->normal_tree = item_create_scene_for_state(menuitem,
 		theme->menu_items_text_color,
-		theme->menu_items_bg_color, menuitem->arrow);
-	scaled_font_buffer_update(menuitem->selected.buffer, menuitem->text,
-		text_width, &rc.font_menuitem,
+		theme->menu_items_bg_color);
+	menuitem->selected_tree = item_create_scene_for_state(menuitem,
 		theme->menu_items_active_text_color,
-		theme->menu_items_active_bg_color, menuitem->arrow);
-
-	/* Center font nodes */
-	int x = theme->menu_items_padding_x;
-	int y = (theme->menu_item_height - menuitem->normal.buffer->height) / 2;
-	wlr_scene_node_set_position(menuitem->normal.text, x, y);
-	y = (theme->menu_item_height - menuitem->selected.buffer->height) / 2;
-	wlr_scene_node_set_position(menuitem->selected.text, x, y);
+		theme->menu_items_active_bg_color);
+	/* Hide selected state */
+	wlr_scene_node_set_enabled(&menuitem->selected_tree->node, false);
 
 	/* Position the item in relation to its menu */
 	wlr_scene_node_set_position(&menuitem->tree->node,
@@ -249,22 +263,21 @@ separator_create_scene(struct menuitem *menuitem, int *item_y)
 		LAB_NODE_DESC_MENUITEM, menuitem);
 
 	/* Tree to hold background and line buffer */
-	menuitem->normal.tree = wlr_scene_tree_create(menuitem->tree);
+	menuitem->normal_tree = wlr_scene_tree_create(menuitem->tree);
 
 	/* Item background nodes */
-	menuitem->normal.background = &wlr_scene_rect_create(
-		menuitem->normal.tree, bg_width, bg_height,
-		theme->menu_items_bg_color)->node;
+	wlr_scene_rect_create(menuitem->normal_tree, bg_width, bg_height,
+		theme->menu_items_bg_color);
 
 	/* Draw separator line */
 	int line_width = bg_width - 2 * theme->menu_separator_padding_width;
-	menuitem->normal.text = &wlr_scene_rect_create(
-		menuitem->normal.tree, line_width,
+	struct wlr_scene_rect *line_rect = wlr_scene_rect_create(
+		menuitem->normal_tree, line_width,
 		theme->menu_separator_line_thickness,
-		theme->menu_separator_color)->node;
+		theme->menu_separator_color);
 
 	/* Vertically center-align separator line */
-	wlr_scene_node_set_position(menuitem->normal.text,
+	wlr_scene_node_set_position(&line_rect->node,
 		theme->menu_separator_padding_width,
 		theme->menu_separator_padding_height);
 	wlr_scene_node_set_position(&menuitem->tree->node,
@@ -289,20 +302,19 @@ title_create_scene(struct menuitem *menuitem, int *item_y)
 		LAB_NODE_DESC_MENUITEM, menuitem);
 
 	/* Tree to hold background and text buffer */
-	menuitem->normal.tree = wlr_scene_tree_create(menuitem->tree);
+	menuitem->normal_tree = wlr_scene_tree_create(menuitem->tree);
 
 	/* Background */
-	menuitem->normal.background = &wlr_scene_rect_create(
-		menuitem->normal.tree, bg_width,
-		theme->menu_header_height, bg_color)->node;
+	wlr_scene_rect_create(menuitem->normal_tree,
+		bg_width, theme->menu_header_height, bg_color);
 
 	/* Draw separator title */
-	menuitem->normal.buffer = scaled_font_buffer_create(menuitem->normal.tree);
-	assert(menuitem->normal.buffer);
-	menuitem->normal.text = &menuitem->normal.buffer->scene_buffer->node;
-	scaled_font_buffer_update(menuitem->normal.buffer, menuitem->text,
+	struct scaled_font_buffer *title_font_buffer =
+		scaled_font_buffer_create(menuitem->normal_tree);
+	assert(title_font_buffer);
+	scaled_font_buffer_update(title_font_buffer, menuitem->text,
 		bg_width - 2 * theme->menu_items_padding_x,
-		&rc.font_menuheader, text_color, bg_color, /* arrow */ NULL);
+		&rc.font_menuheader, text_color, bg_color);
 
 	int title_x = 0;
 	switch (theme->menu_title_text_justify) {
@@ -318,8 +330,9 @@ title_create_scene(struct menuitem *menuitem, int *item_y)
 				- theme->menu_items_padding_x;
 		break;
 	}
-	int title_y = (theme->menu_header_height - menuitem->normal.buffer->height) / 2;
-	wlr_scene_node_set_position(menuitem->normal.text, title_x, title_y);
+	int title_y = (theme->menu_header_height - title_font_buffer->height) / 2;
+	wlr_scene_node_set_position(&title_font_buffer->scene_buffer->node,
+		title_x, title_y);
 
 	wlr_scene_node_set_position(&menuitem->tree->node,
 		theme->menu_border_width, *item_y);
@@ -337,8 +350,6 @@ menu_update_scene(struct menu *menu)
 		wlr_scene_node_destroy(&menu->scene_tree->node);
 		wl_list_for_each(item, &menu->menuitems, link) {
 			item->tree = NULL;
-			item->normal = (struct menu_scene){0};
-			item->selected = (struct menu_scene){0};
 		}
 	}
 	menu->scene_tree = wlr_scene_tree_create(menu->server->menu_tree);
@@ -596,6 +607,36 @@ is_toplevel_static_menu_definition(xmlNode *n, char *id)
 	return id && nr_parents(n) == 2;
 }
 
+static bool parse_buf(struct server *server, struct buf *buf);
+static int handle_pipemenu_readable(int fd, uint32_t mask, void *_ctx);
+static int handle_pipemenu_timeout(void *_ctx);
+
+static void
+parse_root_pipemenu(struct menu *top_level_menu, const char *execute)
+{
+	int pipe_fd = 0;
+	pid_t pid = spawn_piped(execute, &pipe_fd);
+	if (pid <= 0) {
+		wlr_log(WLR_ERROR, "Failed to spawn pipe menu process %s", execute);
+		return;
+	}
+
+	struct menu_pipe_context *ctx = znew(*ctx);
+	ctx->server = top_level_menu->server;
+	ctx->top_level_menu = top_level_menu;
+	ctx->pid = pid;
+	ctx->pipe_fd = pipe_fd;
+	ctx->buf = BUF_INIT;
+	top_level_menu->pipe_ctx = ctx;
+
+	ctx->event_read = wl_event_loop_add_fd(ctx->server->wl_event_loop,
+		pipe_fd, WL_EVENT_READABLE, handle_pipemenu_readable, ctx);
+
+	ctx->event_timeout = wl_event_loop_add_timer(ctx->server->wl_event_loop,
+		handle_pipemenu_timeout, ctx);
+	wl_event_source_timer_update(ctx->event_timeout, PIPEMENU_TIMEOUT_IN_MS);
+}
+
 /*
  * <menu> elements have three different roles:
  *  * Definition of (sub)menu - has ID, LABEL and CONTENT
@@ -613,25 +654,22 @@ handle_menu_element(xmlNode *n, struct server *server)
 		wlr_log(WLR_DEBUG, "pipemenu '%s:%s:%s'", id, label, execute);
 		if (!current_menu) {
 			/*
-			 * We currently do not support pipemenus without a
-			 * parent <item> such as the one the example below:
+			 * Handle pipemenu as the root-menu such this:
 			 *
 			 * <?xml version="1.0" encoding="UTF-8"?>
 			 * <openbox_menu>
 			 *   <menu id="root-menu" label="foo" execute="bar"/>
 			 * </openbox_menu>
-			 *
-			 * TODO: Consider supporting this
 			 */
-			wlr_log(WLR_ERROR,
-				"pipemenu '%s:%s:%s' has no parent <menu>",
-				id, label, execute);
-			goto error;
+			struct menu *menu = menu_create(server, id, label);
+			parse_root_pipemenu(menu, execute);
+		} else {
+			current_item = item_create(current_menu, label,
+				/* arrow */ true);
+			current_item_action = NULL;
+			current_item->execute = xstrdup(execute);
+			current_item->id = xstrdup(id);
 		}
-		current_item = item_create(current_menu, label, /* arrow */ true);
-		current_item_action = NULL;
-		current_item->execute = xstrdup(execute);
-		current_item->id = xstrdup(id);
 	} else if ((label && id) || is_toplevel_static_menu_definition(n, id)) {
 		/*
 		 * (label && id) refers to <menu id="" label=""> which is an
@@ -755,7 +793,8 @@ xml_tree_walk(xmlNode *node, struct server *server)
 static bool
 parse_buf(struct server *server, struct buf *buf)
 {
-	xmlDoc *d = xmlParseMemory(buf->data, buf->len);
+	int options = 0;
+	xmlDoc *d = xmlReadMemory(buf->data, buf->len, NULL, NULL, options);
 	if (!d) {
 		wlr_log(WLR_ERROR, "xmlParseMemory()");
 		return false;
@@ -816,109 +855,83 @@ parse_xml(const char *filename, struct server *server)
 	paths_destroy(&paths);
 }
 
-static int
-menu_get_full_width(struct menu *menu)
-{
-	struct theme *theme = menu->server->theme;
-	int width = menu->size.width - theme->menu_overlap_x
-		- theme->menu_border_width;
-	int child_width;
-	int max_child_width = 0;
-	struct menuitem *item;
-	wl_list_for_each(item, &menu->menuitems, link) {
-		if (!item->submenu) {
-			continue;
-		}
-		child_width = menu_get_full_width(item->submenu);
-		if (child_width > max_child_width) {
-			max_child_width = child_width;
-		}
-	}
-	return width + max_child_width;
-}
-
-/**
- * get_submenu_position() - get output layout coordinates of menu window
- * @item: the menuitem that triggers the submenu (static or dynamic)
+/*
+ * Returns the box of a menuitem next to which its submenu is opened.
+ * This box can be shrunk or expanded by menu overlaps and borders.
  */
 static struct wlr_box
-get_submenu_position(struct menuitem *item, enum menu_align align)
+get_item_anchor_rect(struct theme *theme, struct menuitem *item)
 {
-	struct wlr_box pos = { 0 };
 	struct menu *menu = item->parent;
-	struct theme *theme = menu->server->theme;
-	pos.x = menu->scene_tree->node.x;
-	pos.y = menu->scene_tree->node.y;
-
-	if (align & LAB_MENU_OPEN_RIGHT) {
-		pos.x += menu->size.width - theme->menu_overlap_x
-			- theme->menu_border_width;
-	}
-	pos.y += item->tree->node.y + theme->menu_overlap_y
-		- theme->menu_border_width;
-	return pos;
+	int menu_x = menu->scene_tree->node.x;
+	int menu_y = menu->scene_tree->node.y;
+	int overlap_x = theme->menu_overlap_x + theme->menu_border_width;
+	int overlap_y = theme->menu_overlap_y - theme->menu_border_width;
+	return (struct wlr_box) {
+		.x = menu_x + overlap_x,
+		.y = menu_y + item->tree->node.y + overlap_y,
+		.width = menu->size.width - 2 * overlap_x,
+		.height = theme->menu_item_height - 2 * overlap_y,
+	};
 }
 
 static void
-menu_configure(struct menu *menu, int lx, int ly, enum menu_align align)
+menu_configure(struct menu *menu, struct wlr_box anchor_rect)
 {
 	struct theme *theme = menu->server->theme;
 
-	/* Get output local coordinates + output usable area */
-	double ox = lx;
-	double oy = ly;
-	struct wlr_output *wlr_output = wlr_output_layout_output_at(
-		menu->server->output_layout, lx, ly);
-	struct output *output = wlr_output ? output_from_wlr_output(
-		menu->server, wlr_output) : NULL;
+	/* Get output usable area to place the menu within */
+	struct output *output = output_nearest_to(menu->server,
+		anchor_rect.x, anchor_rect.y);
 	if (!output) {
-		wlr_log(WLR_ERROR,
-			"Failed to position menu %s (%s) and its submenus: "
-			"Not enough screen space", menu->id, menu->label);
+		wlr_log(WLR_ERROR, "no output found around (%d,%d)",
+			anchor_rect.x, anchor_rect.y);
 		return;
 	}
-	wlr_output_layout_output_coords(menu->server->output_layout,
-		wlr_output, &ox, &oy);
+	struct wlr_box usable = output_usable_area_in_layout_coords(output);
 
-	if (align == LAB_MENU_OPEN_AUTO) {
-		int full_width = menu_get_full_width(menu);
-		if (ox + full_width > output->usable_area.width) {
-			align = LAB_MENU_OPEN_LEFT;
-		} else {
-			align = LAB_MENU_OPEN_RIGHT;
-		}
-	}
-
-	if (oy + menu->size.height > output->usable_area.height) {
-		align &= ~LAB_MENU_OPEN_BOTTOM;
-		align |= LAB_MENU_OPEN_TOP;
+	/* Policy for menu placement */
+	struct wlr_xdg_positioner_rules rules = {0};
+	rules.size.width = menu->size.width;
+	rules.size.height = menu->size.height;
+	/* A rectangle next to which the menu is opened */
+	rules.anchor_rect = anchor_rect;
+	/*
+	 * Place menu at left or right side of anchor_rect, with their
+	 * top edges aligned. The alignment is inherited from parent.
+	 */
+	if (menu->parent && menu->parent->align_left) {
+		rules.anchor = XDG_POSITIONER_ANCHOR_TOP_LEFT;
+		rules.gravity = XDG_POSITIONER_GRAVITY_BOTTOM_LEFT;
 	} else {
-		align &= ~LAB_MENU_OPEN_TOP;
-		align |= LAB_MENU_OPEN_BOTTOM;
+		rules.anchor = XDG_POSITIONER_ANCHOR_TOP_RIGHT;
+		rules.gravity = XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT;
+	}
+	/* Flip or slide the menu when it overflows from the output */
+	rules.constraint_adjustment =
+		XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_X
+		| XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X
+		| XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y;
+	if (!menu->parent) {
+		/* Allow vertically flipping the root menu */
+		rules.constraint_adjustment |=
+			XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_Y;
 	}
 
-	if (align & LAB_MENU_OPEN_LEFT) {
-		lx -= menu->size.width - theme->menu_overlap_x - theme->menu_border_width;
-	}
-	if (align & LAB_MENU_OPEN_TOP) {
-		ly -= menu->size.height;
-		if (menu->parent) {
-			/* For submenus adjust y to bottom left corner */
-			ly += theme->menu_item_height;
-		}
-	}
-	wlr_scene_node_set_position(&menu->scene_tree->node, lx, ly);
+	struct wlr_box box;
+	wlr_xdg_positioner_rules_get_geometry(&rules, &box);
+	wlr_xdg_positioner_rules_unconstrain_box(&rules, &usable, &box);
+	wlr_scene_node_set_position(&menu->scene_tree->node, box.x, box.y);
 
-	/* Needed for pipemenus to inherit alignment */
-	menu->align = align;
+	menu->align_left = (box.x < anchor_rect.x);
 
 	struct menuitem *item;
 	wl_list_for_each(item, &menu->menuitems, link) {
 		if (!item->submenu) {
 			continue;
 		}
-		struct wlr_box pos = get_submenu_position(item, align);
-		menu_configure(item->submenu, pos.x, pos.y, align);
+		anchor_rect = get_item_anchor_rect(theme, item);
+		menu_configure(item->submenu, anchor_rect);
 	}
 }
 
@@ -1182,6 +1195,10 @@ menu_free(struct menu *menu)
 		item_destroy(item);
 	}
 
+	if (menu->pipe_ctx) {
+		menu->pipe_ctx->top_level_menu = NULL;
+	}
+
 	/*
 	 * Destroying the root node will destroy everything,
 	 * including node descriptors and scaled_font_buffers.
@@ -1264,14 +1281,14 @@ menu_set_selection(struct menu *menu, struct menuitem *item)
 	/* Clear old selection */
 	if (menu->selection.item) {
 		wlr_scene_node_set_enabled(
-			&menu->selection.item->normal.tree->node, true);
+			&menu->selection.item->normal_tree->node, true);
 		wlr_scene_node_set_enabled(
-			&menu->selection.item->selected.tree->node, false);
+			&menu->selection.item->selected_tree->node, false);
 	}
 	/* Set new selection */
 	if (item) {
-		wlr_scene_node_set_enabled(&item->normal.tree->node, false);
-		wlr_scene_node_set_enabled(&item->selected.tree->node, true);
+		wlr_scene_node_set_enabled(&item->normal_tree->node, false);
+		wlr_scene_node_set_enabled(&item->selected_tree->node, true);
 	}
 	menu->selection.item = item;
 }
@@ -1337,6 +1354,10 @@ menu_close(struct menu *menu)
 void
 menu_open_root(struct menu *menu, int x, int y)
 {
+	if (menu->server->input_mode != LAB_INPUT_STATE_PASSTHROUGH) {
+		return;
+	}
+
 	assert(menu);
 	if (menu->server->menu_current) {
 		menu_close(menu->server->menu_current);
@@ -1344,16 +1365,45 @@ menu_open_root(struct menu *menu, int x, int y)
 	}
 	close_all_submenus(menu);
 	menu_set_selection(menu, NULL);
-	menu_configure(menu, x, y, LAB_MENU_OPEN_AUTO);
+	menu_configure(menu, (struct wlr_box){.x = x, .y = y});
 	wlr_scene_node_set_enabled(&menu->scene_tree->node, true);
 	menu->server->menu_current = menu;
-	menu->server->input_mode = LAB_INPUT_STATE_MENU;
 	selected_item = NULL;
+	seat_focus_override_begin(&menu->server->seat,
+		LAB_INPUT_STATE_MENU, LAB_CURSOR_DEFAULT);
 }
 
 static void
 create_pipe_menu(struct menu_pipe_context *ctx)
 {
+	if (ctx->top_level_menu) {
+		/*
+		 * We execute the scripts for the toplevel pipemenus at startup
+		 * or Reconfigure, but they can be opened before they finish
+		 * execution, usually with their content empty. Make sure they
+		 * are closed and emptied.
+		 */
+		if (ctx->server->menu_current == ctx->top_level_menu) {
+			menu_close_root(ctx->server);
+		}
+		struct menuitem *item, *tmp;
+		wl_list_for_each_safe(item, tmp, &ctx->top_level_menu->menuitems, link) {
+			item_destroy(item);
+		}
+
+		menu_level++;
+		current_menu = ctx->top_level_menu;
+		if (!parse_buf(ctx->server, &ctx->buf)) {
+			wlr_log(WLR_ERROR, "Failed to parse piped top level menu %s",
+				ctx->top_level_menu->id);
+		}
+		menu_level--;
+		post_processing(ctx->server);
+		validate(ctx->server);
+		menu_update_scene(current_menu);
+		return;
+	}
+
 	assert(ctx->item);
 
 	struct menu *pipe_parent = ctx->item->parent;
@@ -1394,9 +1444,9 @@ create_pipe_menu(struct menu_pipe_context *ctx)
 	/* Set menu-widths before configuring */
 	post_processing(ctx->server);
 
-	enum menu_align align = ctx->item->parent->align;
-	struct wlr_box pos = get_submenu_position(ctx->item, align);
-	menu_configure(pipe_menu, pos.x, pos.y, align);
+	struct wlr_box anchor_rect =
+		get_item_anchor_rect(ctx->server->theme, ctx->item);
+	menu_configure(pipe_menu, anchor_rect);
 
 	validate(ctx->server);
 
@@ -1419,6 +1469,9 @@ pipemenu_ctx_destroy(struct menu_pipe_context *ctx)
 	if (ctx->item) {
 		ctx->item->pipe_ctx = NULL;
 	}
+	if (ctx->top_level_menu) {
+		ctx->top_level_menu->pipe_ctx = NULL;
+	}
 	free(ctx);
 	waiting_for_pipe_menu = false;
 }
@@ -1434,12 +1487,6 @@ handle_pipemenu_timeout(void *_ctx)
 	return 0;
 }
 
-static bool
-starts_with_less_than(const char *s)
-{
-	return (s + strspn(s, " \t\r\n"))[0] == '<';
-}
-
 static int
 handle_pipemenu_readable(int fd, uint32_t mask, void *_ctx)
 {
@@ -1448,7 +1495,7 @@ handle_pipemenu_readable(int fd, uint32_t mask, void *_ctx)
 	char data[8193];
 	ssize_t size;
 
-	if (!ctx->item) {
+	if (!ctx->item && !ctx->top_level_menu) {
 		/* parent menu item got destroyed in the meantime */
 		wlr_log(WLR_INFO, "[pipemenu %ld] parent menu item destroyed",
 			(long)ctx->pid);
@@ -1463,14 +1510,15 @@ handle_pipemenu_readable(int fd, uint32_t mask, void *_ctx)
 
 	if (size == -1) {
 		wlr_log_errno(WLR_ERROR, "[pipemenu %ld] failed to read data (%s)",
-			(long)ctx->pid, ctx->item->execute);
+			(long)ctx->pid, ctx->item ? ctx->item->execute : "n/a");
 		goto clean_up;
 	}
 
 	/* Limit pipemenu buffer to 1 MiB for safety */
 	if (ctx->buf.len + size > PIPEMENU_MAX_BUF_SIZE) {
 		wlr_log(WLR_ERROR, "[pipemenu %ld] too big (> %d bytes); killing %s",
-			(long)ctx->pid, PIPEMENU_MAX_BUF_SIZE, ctx->item->execute);
+			(long)ctx->pid, PIPEMENU_MAX_BUF_SIZE,
+			ctx->item ? ctx->item->execute : "n/a");
 		kill(ctx->pid, SIGTERM);
 		goto clean_up;
 	}
@@ -1483,7 +1531,7 @@ handle_pipemenu_readable(int fd, uint32_t mask, void *_ctx)
 	}
 
 	/* Guard against badly formed data such as binary input */
-	if (!starts_with_less_than(ctx->buf.data)) {
+	if (!str_starts_with(ctx->buf.data, '<', " \t\r\n")) {
 		wlr_log(WLR_ERROR, "expect xml data to start with '<'; abort pipemenu");
 		goto clean_up;
 	}
@@ -1645,8 +1693,7 @@ menu_execute_item(struct menuitem *item)
 	 */
 	struct server *server = item->parent->server;
 	menu_close(server->menu_current);
-	server->input_mode = LAB_INPUT_STATE_PASSTHROUGH;
-	cursor_update_focus(server);
+	seat_focus_override_end(&server->seat);
 
 	/*
 	 * We call the actions after closing the menu so that virtual keyboard
@@ -1756,7 +1803,7 @@ menu_close_root(struct server *server)
 		server->menu_current = NULL;
 		destroy_pipemenus(server);
 	}
-	server->input_mode = LAB_INPUT_STATE_PASSTHROUGH;
+	seat_focus_override_end(&server->seat);
 }
 
 void

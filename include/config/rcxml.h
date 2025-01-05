@@ -9,6 +9,7 @@
 #include "common/border.h"
 #include "common/buf.h"
 #include "common/font.h"
+#include "common/three-state.h"
 #include "config/touch.h"
 #include "config/tablet.h"
 #include "config/tablet-tool.h"
@@ -68,6 +69,7 @@ struct rcxml {
 	int gap;
 	enum adaptive_sync_mode adaptive_sync;
 	enum tearing_mode allow_tearing;
+	bool auto_enable_outputs;
 	bool reuse_output_mode;
 	enum view_placement_policy placement_policy;
 	bool xwayland_persistence;
@@ -104,7 +106,7 @@ struct rcxml {
 	/* keyboard */
 	int repeat_rate;
 	int repeat_delay;
-	bool kb_numlock_enable;
+	enum three_state kb_numlock_enable;
 	bool kb_layout_per_window;
 	struct wl_list keybinds;   /* struct keybind.link */
 

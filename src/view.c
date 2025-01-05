@@ -199,8 +199,20 @@ view_matches_query(struct view *view, struct view_query *query)
 	}
 
 	if (query->monitor) {
-		struct output *target = output_from_name(view->server, query->monitor);
-		if (target != view->output) {
+		struct output *current = output_nearest_to_cursor(view->server);
+
+		if (!strcasecmp(query->monitor, "current") && current != view->output) {
+			return false;
+		}
+		if (!strcasecmp(query->monitor, "left") &&
+			output_get_adjacent(current, VIEW_EDGE_LEFT, false) != view->output) {
+			return false;
+		}
+		if (!strcasecmp(query->monitor, "right") &&
+			output_get_adjacent(current, VIEW_EDGE_RIGHT, false) != view->output) {
+			return false;
+		}
+		if (output_from_name(view->server, query->monitor) != view->output) {
 			return false;
 		}
 	}
@@ -405,7 +417,7 @@ static struct wlr_box
 view_get_edge_snap_box(struct view *view, struct output *output,
 		enum view_edge edge)
 {
-	struct wlr_box usable = output_usable_area_scaled(output);
+	struct wlr_box usable = output_usable_area_in_layout_coords(output);
 	int x_offset = edge == VIEW_EDGE_RIGHT
 		? (usable.width + rc.gap) / 2 : rc.gap;
 	int y_offset = edge == VIEW_EDGE_DOWN
@@ -2323,13 +2335,15 @@ view_has_strut_partial(struct view *view)
 		view->impl->has_strut_partial(view);
 }
 
+/* Note: It is safe to assume that this function never returns NULL */
 const char *
 view_get_string_prop(struct view *view, const char *prop)
 {
 	assert(view);
 	assert(prop);
 	if (view->impl->get_string_prop) {
-		return view->impl->get_string_prop(view, prop);
+		const char *ret = view->impl->get_string_prop(view, prop);
+		return ret ? ret : "";
 	}
 	return "";
 }
@@ -2338,12 +2352,7 @@ void
 view_update_title(struct view *view)
 {
 	assert(view);
-	const char *title = view_get_string_prop(view, "title");
-	if (!title) {
-		return;
-	}
 	ssd_update_title(view->ssd);
-
 	wl_signal_emit_mutable(&view->events.new_title, NULL);
 }
 
@@ -2351,15 +2360,9 @@ void
 view_update_app_id(struct view *view)
 {
 	assert(view);
-	const char *app_id = view_get_string_prop(view, "app_id");
-	if (!app_id) {
-		return;
-	}
-
 	if (view->ssd_enabled) {
 		ssd_update_window_icon(view->ssd);
 	}
-
 	wl_signal_emit_mutable(&view->events.new_app_id, NULL);
 }
 
@@ -2471,7 +2474,7 @@ view_set_shade(struct view *view, bool shaded)
 
 	view->shaded = shaded;
 	ssd_enable_shade(view->ssd, view->shaded);
-	wlr_scene_node_set_enabled(view->scene_node, !view->shaded);
+	wlr_scene_node_set_enabled(view->content_node, !view->shaded);
 
 	if (view->impl->shade) {
 		view->impl->shade(view, shaded);
@@ -2519,9 +2522,7 @@ view_destroy(struct view *view)
 
 	if (server->grabbed_view == view) {
 		/* Application got killed while moving around */
-		server->input_mode = LAB_INPUT_STATE_PASSTHROUGH;
-		server->grabbed_view = NULL;
-		overlay_hide(&server->seat);
+		interactive_cancel(view);
 	}
 
 	if (server->active_view == view) {

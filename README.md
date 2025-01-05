@@ -28,6 +28,7 @@ href="NEWS.md">Release&nbsp;Notes</a>]</h3>
 Labwc stands for Lab Wayland Compositor, where lab can mean any of the
 following:
 
+- Lightweight And Box-inspired
 - sense of experimentation and treading new ground
 - inspired by BunsenLabs and ArchLabs
 - your favorite pet
@@ -224,6 +225,7 @@ If you have not created an rc.xml config file, default bindings will be:
 | combination              | action
 | ------------------------ | ------
 | `alt`-`tab`              | activate next window
+| `alt`-`shift`-`tab`      | activate previous window
 | `super`-`return`         | alacritty
 | `alt`-`F3`               | bemenu
 | `alt`-`F4`               | close window
@@ -258,6 +260,7 @@ Suggested apps to use with labwc:
 - Launchers: [bemenu], [fuzzel], [wofi]
 - Output managers: [wlopm], [kanshi], [wlr-randr]
 - Screen locker: [swaylock]
+- Gamma adjustment: [gammastep]
 
 See [integration] for further details.
 
@@ -297,4 +300,5 @@ See [integration] for further details.
 [kanshi]: https://sr.ht/~emersion/kanshi/
 [wlr-randr]: https://sr.ht/~emersion/wlr-randr/
 [swaylock]: https://github.com/swaywm/swaylock
+[gammastep]: https://gitlab.com/chinstrap/gammastep
 

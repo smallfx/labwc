@@ -117,15 +117,24 @@ Actions are used in menus and keyboard/mouse bindings.
 	Cycle focus to next/previous window respectively.++
 	Default keybind for NextWindow is Alt-Tab.
 
-	The shift key is used to reverse direction while cycling.
-
 	The arrow keys are used to move forwards/backwards while cycling.
 
 *<action name="Reconfigure" />*
 	Re-load configuration and theme files.
 
-*<action name="ShowMenu" menu="value" atCursor="yes" />*
+*<action name="ShowMenu" menu="root-menu"/>*
+
 	Show a menu.
+
+```
+<action name="ShowMenu" menu="MENU">
+  <atCursor>yes|no</atCursor>
+  <position>
+    <x>X</x>
+    <y>Y</y>
+  </position>
+</action>
+```
 
 	*menu* The name of the menu to show. The menus "root-menu",
 	"client-menu", "client-send-to-menu" and "client-list-combined-menu"
@@ -329,6 +338,19 @@ Actions are used in menus and keyboard/mouse bindings.
 	decorations (including those for which the server-side titlebar has been
 	hidden) are not eligible for shading.
 
+*<action name="WarpCursor" to="output" x="center" y="center" />*
+	Warp the cursor to a position relative to the active output or window.
+
+	*to* [output|window] Specifies the target area of the warp.
+	Default is "output"
+	*x* [center|value] Specifies the horizontal warp position within the target area.
+	"center": Moves the cursor to the horizontal center of the target area.
+	Positive or negative integers warp the cursor to a position offset by the specified
+	number of pixels from the left or right edge of the target area respectively.
+	Default is "center"
+	*y* [center|value] Equivalent for the vertical warp position within the target area.
+	Default is "center"
+
 *<action name="EnableTabletMouseEmulation" />*++
 *<action name="DisableTabletMouseEmulation" />*++
 *<action name="ToggleTabletMouseEmulation">*
@@ -424,6 +446,11 @@ Actions that execute other actions. Used in keyboard/mouse bindings.
 		*decoration* [full|border|none]
 			Whether the client has full server-side decorations,
 			borders only, or no server-side decorations.
+
+		*monitor* [current|left|right|<monitor_name>]
+			Whether the client is on a monitor relative to the to
+			the currently focused monitor (current, left, or right)
+			or on a monitor with the supplied <monitor_name>.
 
 		This argument is optional.
 

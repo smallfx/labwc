@@ -121,7 +121,8 @@ enum action_type {
 	ACTION_TYPE_TOGGLE_TABLET_MOUSE_EMULATION,
 	ACTION_TYPE_TOGGLE_MAGNIFY,
 	ACTION_TYPE_ZOOM_IN,
-	ACTION_TYPE_ZOOM_OUT
+	ACTION_TYPE_ZOOM_OUT,
+	ACTION_TYPE_WARP_CURSOR,
 };
 
 const char *action_names[] = {
@@ -186,6 +187,7 @@ const char *action_names[] = {
 	"ToggleMagnify",
 	"ZoomIn",
 	"ZoomOut",
+	"WarpCursor",
 	NULL
 };
 
@@ -475,6 +477,12 @@ action_arg_from_xml_node(struct action *action, const char *nodename, const char
 			goto cleanup;
 		}
 		break;
+	case ACTION_TYPE_WARP_CURSOR:
+		if (!strcmp(argument, "to") || !strcmp(argument, "x") || !strcmp(argument, "y")) {
+			action_arg_add_str(action, argument, content);
+			goto cleanup;
+		}
+		break;
 	}
 
 	wlr_log(WLR_ERROR, "Invalid argument for action %s: '%s'",
@@ -670,14 +678,17 @@ show_menu(struct server *server, struct view *view, struct cursor_context *ctx,
 	}
 	/* Place menu in the view corner if desired (and menu is not root-menu) */
 	if (!at_cursor && view) {
-		x = view->current.x;
+		struct wlr_box extent = ssd_max_extents(view);
+		x = extent.x;
 		y = view->current.y;
 		/* Push the client menu underneath the button */
 		if (is_client_menu && ssd_part_contains(
 				LAB_SSD_BUTTON, ctx->type)) {
 			assert(ctx->node);
-			int ly;
-			wlr_scene_node_coords(ctx->node, &x, &ly);
+			int lx, ly;
+			wlr_scene_node_coords(ctx->node, &lx, &ly);
+			/* MAX() prevents negative x when the window is maximized */
+			x = MAX(x, lx - server->theme->menu_border_width);
 		}
 	}
 
@@ -688,40 +699,41 @@ show_menu(struct server *server, struct view *view, struct cursor_context *ctx,
 	if (pos_x && pos_y) {
 		struct output *output = output_nearest_to(server,
 				server->seat.cursor->x, server->seat.cursor->y);
+		struct wlr_box usable = output_usable_area_in_layout_coords(output);
 
 		if (!strcasecmp(pos_x, "center")) {
-			x = (output->usable_area.width - menu->size.width) / 2;
+			x = (usable.width - menu->size.width) / 2;
 		} else if (strchr(pos_x, '%')) {
-			x = (output->usable_area.width * atoi(pos_x)) / 100;
+			x = (usable.width * atoi(pos_x)) / 100;
 		} else {
 			if (pos_x[0] == '-') {
 				int neg_x = strtol(pos_x, NULL, 10);
-				x = output->usable_area.width + neg_x;
+				x = usable.width + neg_x;
 			} else {
 				x = atoi(pos_x);
 			}
 		}
 
 		if (!strcasecmp(pos_y, "center")) {
-			y = (output->usable_area.height / 2) - (menu->size.height / 2);
+			y = (usable.height / 2) - (menu->size.height / 2);
 		} else if (strchr(pos_y, '%')) {
-			y = (output->usable_area.height * atoi(pos_y)) / 100;
+			y = (usable.height * atoi(pos_y)) / 100;
 		} else {
 			if (pos_y[0] == '-') {
 				int neg_y = strtol(pos_y, NULL, 10);
-				y = output->usable_area.height + neg_y;
+				y = usable.height + neg_y;
 			} else {
 				y = atoi(pos_y);
 			}
 		}
 		/* keep menu from being off screen */
 		x = MAX(x, 0);
-		x = MIN(x, output->usable_area.width - 1);
+		x = MIN(x, usable.width - 1);
 		y = MAX(y, 0);
-		y = MIN(y, output->usable_area.height - 1);
+		y = MIN(y, usable.height - 1);
 		/* adjust for which monitor to appear on */
-		x += output->usable_area.x;
-		y += output->usable_area.y;
+		x += usable.x;
+		y += usable.y;
 	}
 
 	/* Replaced by next show_menu() or cleaned on view_destroy() */
@@ -777,26 +789,6 @@ run_if_action(struct view *view, struct server *server, struct action *action)
 	return !strcmp(branch, "then");
 }
 
-static bool
-shift_is_pressed(struct server *server)
-{
-	uint32_t modifiers = wlr_keyboard_get_modifiers(
-			&server->seat.keyboard_group->keyboard);
-	return modifiers & WLR_MODIFIER_SHIFT;
-}
-
-static void
-start_window_cycling(struct server *server, enum lab_cycle_dir direction)
-{
-	/* Remember direction so it can be followed by subsequent key presses */
-	server->osd_state.initial_direction = direction;
-	server->osd_state.initial_keybind_contained_shift =
-		shift_is_pressed(server);
-	server->osd_state.cycle_view = desktop_cycle_view(server,
-		server->osd_state.cycle_view, direction);
-	osd_update(server);
-}
-
 static struct output *
 get_target_output(struct output *output, struct server *server,
 	struct action *action)
@@ -818,6 +810,43 @@ get_target_output(struct output *output, struct server *server,
 	}
 
 	return target;
+}
+
+static void
+warp_cursor(struct view *view, struct output *output, const char *to, const char *x, const char *y)
+{
+	struct wlr_box target_area = {0};
+	int goto_x;
+	int goto_y;
+
+	if (!strcasecmp(to, "output") && output) {
+		target_area = output_usable_area_in_layout_coords(output);
+	} else if (!strcasecmp(to, "window") && view) {
+		target_area = view->current;
+	} else {
+		wlr_log(WLR_ERROR, "Invalid argument for action WarpCursor: 'to' (%s)", to);
+	}
+
+	if (!strcasecmp(x, "center")) {
+		goto_x = target_area.x + target_area.width / 2;
+	} else {
+		int offset_x = atoi(x);
+		goto_x = offset_x >= 0 ?
+			target_area.x + offset_x :
+			target_area.x + target_area.width + offset_x;
+	}
+
+	if (!strcasecmp(y, "center")) {
+		goto_y = target_area.y + target_area.height / 2;
+	} else {
+		int offset_y = atoi(y);
+		goto_y = offset_y >= 0 ?
+			target_area.y + offset_y :
+			target_area.y + target_area.height + offset_y;
+	}
+
+	wlr_cursor_warp(output->server->seat.cursor, NULL, goto_x, goto_y);
+	cursor_update_focus(output->server);
 }
 
 void
@@ -926,10 +955,18 @@ actions_run(struct view *activator, struct server *server,
 			}
 			break;
 		case ACTION_TYPE_NEXT_WINDOW:
-			start_window_cycling(server, LAB_CYCLE_DIR_FORWARD);
+			if (server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
+				osd_cycle(server, LAB_CYCLE_DIR_FORWARD);
+			} else {
+				osd_begin(server, LAB_CYCLE_DIR_FORWARD);
+			}
 			break;
 		case ACTION_TYPE_PREVIOUS_WINDOW:
-			start_window_cycling(server, LAB_CYCLE_DIR_BACKWARD);
+			if (server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
+				osd_cycle(server, LAB_CYCLE_DIR_BACKWARD);
+			} else {
+				osd_begin(server, LAB_CYCLE_DIR_BACKWARD);
+			}
 			break;
 		case ACTION_TYPE_RECONFIGURE:
 			kill(getpid(), SIGHUP);
@@ -1282,6 +1319,16 @@ actions_run(struct view *activator, struct server *server,
 			break;
 		case ACTION_TYPE_ZOOM_OUT:
 			magnify_set_scale(server, MAGNIFY_DECREASE);
+			break;
+		case ACTION_TYPE_WARP_CURSOR:
+			{
+				const char *to = action_get_str(action, "to", "output");
+				const char *x = action_get_str(action, "x", "center");
+				const char *y = action_get_str(action, "y", "center");
+				struct output *output = output_nearest_to_cursor(server);
+
+				warp_cursor(view, output, to, x, y);
+			}
 			break;
 		case ACTION_TYPE_INVALID:
 			wlr_log(WLR_ERROR, "Not executing unknown action");
