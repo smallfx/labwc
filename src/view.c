@@ -2482,6 +2482,21 @@ view_set_shade(struct view *view, bool shaded)
 }
 
 void
+view_nnize_node(struct wlr_scene_node *in_node) {
+	if (in_node->type == WLR_SCENE_NODE_BUFFER) {
+		struct wlr_scene_buffer* sb = wlr_scene_buffer_from_node(in_node);
+		wlr_scene_buffer_set_filter_mode(sb, WLR_SCALE_FILTER_NEAREST);
+	}
+	if (in_node->type == WLR_SCENE_NODE_TREE) {
+		struct wlr_scene_tree *tree = wlr_scene_tree_from_node(in_node);
+		struct wlr_scene_node *node;
+		wl_list_for_each(node, &tree->children, link) {
+			view_nnize_node(node);
+		}
+	}
+}
+
+void
 view_init(struct view *view)
 {
 	assert(view);

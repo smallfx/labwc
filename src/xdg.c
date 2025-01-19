@@ -986,6 +986,7 @@ xdg_toplevel_new(struct wl_listener *listener, void *data)
 
 	view_init(view);
 	wl_list_insert(&server->views, &view->link);
+	view_nnize_node(view->content_node);
 }
 
 void

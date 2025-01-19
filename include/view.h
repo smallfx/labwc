@@ -599,6 +599,7 @@ void view_reload_ssd(struct view *view);
 int view_get_min_width(void);
 
 void view_set_shade(struct view *view, bool shaded);
+void view_nnize_node(struct wlr_scene_node *node);
 
 struct view_size_hints view_get_size_hints(struct view *view);
 void view_adjust_size(struct view *view, int *w, int *h);
