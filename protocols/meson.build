@@ -21,7 +21,6 @@ server_protocols = [
 	wl_protocol_dir / 'staging/drm-lease/drm-lease-v1.xml',
 	wl_protocol_dir / 'staging/xwayland-shell/xwayland-shell-v1.xml',
 	wl_protocol_dir / 'staging/tearing-control/tearing-control-v1.xml',
-  wl_protocol_dir / 'unstable/text-input/text-input-unstable-v1.xml',
 	wl_protocol_dir / 'staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml',
 	wl_protocol_dir / 'staging/ext-workspace/ext-workspace-v1.xml',
 	wl_protocol_dir / 'staging/ext-image-capture-source/ext-image-capture-source-v1.xml',
