@@ -958,8 +958,7 @@ handle_new_xdg_toplevel(struct wl_listener *listener, void *data)
 	view->scene_tree = wlr_scene_tree_create(view->workspace->tree);
 	wlr_scene_node_set_enabled(&view->scene_tree->node, false);
 
-	struct wlr_scene_tree *tree = wlr_scene_xdg_surface_create(
-		view->scene_tree, xdg_surface);
+	struct wlr_scene_tree *tree = wlr_scene_xdg_surface_create(view->scene_tree, xdg_surface);
 	if (!tree) {
 		/* TODO: might need further clean up */
 		wl_resource_post_no_memory(xdg_surface->resource);
@@ -1018,7 +1017,7 @@ handle_new_xdg_toplevel(struct wl_listener *listener, void *data)
 	CONNECT_SIGNAL(xdg_surface, xdg_toplevel_view, new_popup);
 
 	wl_list_insert(&server->views, &view->link);
-	view_nnize_node(view->content_node);
+	view_nnize_tree(view->content_tree);
 }
 
 static void

@@ -638,6 +638,7 @@ void view_reload_ssd(struct view *view);
 int view_get_min_width(void);
 
 void view_set_shade(struct view *view, bool shaded);
+void view_nnize_tree(struct wlr_scene_tree *tree);
 void view_nnize_node(struct wlr_scene_node *node);
 
 /* Icon buffers set with this function are dropped later */
