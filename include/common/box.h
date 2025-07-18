@@ -4,8 +4,6 @@
 
 #include <wlr/util/box.h>
 
-bool box_contains(struct wlr_box *box_super, struct wlr_box *box_sub);
-
 bool box_intersects(struct wlr_box *box_a, struct wlr_box *box_b);
 
 /* Returns the bounding box of 2 boxes */
@@ -21,5 +19,7 @@ void box_union(struct wlr_box *box_dest, struct wlr_box *box_a,
  * relative to the top-left corner of the bounding box.
  */
 struct wlr_box box_fit_within(int width, int height, struct wlr_box *bounding_box);
+
+struct wlr_fbox box_to_fbox(struct wlr_box *box);
 
 #endif /* LABWC_BOX_H */

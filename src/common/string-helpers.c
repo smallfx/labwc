@@ -2,10 +2,17 @@
 #include <assert.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include "common/mem.h"
 #include "common/string-helpers.h"
+
+enum str_flags {
+	STR_FLAG_NONE = 0,
+	STR_FLAG_IGNORE_CASE,
+};
 
 bool
 string_null_or_empty(const char *s)
@@ -23,14 +30,14 @@ trim_last_field(char *buf, char delim)
 }
 
 static void
-rtrim(char **s)
+rtrim(char *s)
 {
-	size_t len = strlen(*s);
+	size_t len = strlen(s);
 	if (!len) {
 		return;
 	}
-	char *end = *s + len - 1;
-	while (end >= *s && isspace(*end)) {
+	char *end = s + len - 1;
+	while (end >= s && isspace(*end)) {
 		end--;
 	}
 	*(end + 1) = '\0';
@@ -39,10 +46,10 @@ rtrim(char **s)
 char *
 string_strip(char *s)
 {
-	rtrim(&s);
 	while (isspace(*s)) {
 		s++;
 	}
+	rtrim(s);
 	return s;
 }
 
@@ -154,8 +161,8 @@ str_join(const char *const parts[],
 	return buf;
 }
 
-bool
-str_endswith(const char *const string, const char *const suffix)
+static bool
+_str_endswith(const char *const string, const char *const suffix, uint32_t flags)
 {
 	size_t len_str = string ? strlen(string) : 0;
 	size_t len_sfx = suffix ? strlen(suffix) : 0;
@@ -168,7 +175,23 @@ str_endswith(const char *const string, const char *const suffix)
 		return true;
 	}
 
-	return strcmp(string + len_str - len_sfx, suffix) == 0;
+	if (flags & STR_FLAG_IGNORE_CASE) {
+		return strcasecmp(string + len_str - len_sfx, suffix) == 0;
+	} else {
+		return strcmp(string + len_str - len_sfx, suffix) == 0;
+	}
+}
+
+bool
+str_endswith(const char *const string, const char *const suffix)
+{
+	return _str_endswith(string, suffix, STR_FLAG_NONE);
+}
+
+bool
+str_endswith_ignore_case(const char *const string, const char *const suffix)
+{
+	return _str_endswith(string, suffix, STR_FLAG_IGNORE_CASE);
 }
 
 bool
@@ -177,3 +200,8 @@ str_starts_with(const char *s, char needle, const char *ignore_chars)
 	return (s + strspn(s, ignore_chars))[0] == needle;
 }
 
+bool
+str_equal(const char *a, const char *b)
+{
+	return a == b || (a && b && !strcmp(a, b));
+}

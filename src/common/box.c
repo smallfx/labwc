@@ -4,18 +4,6 @@
 #include "common/macros.h"
 
 bool
-box_contains(struct wlr_box *box_super, struct wlr_box *box_sub)
-{
-	if (wlr_box_empty(box_super) || wlr_box_empty(box_sub)) {
-		return false;
-	}
-	return box_super->x <= box_sub->x
-		&& box_super->x + box_super->width >= box_sub->x + box_sub->width
-		&& box_super->y <= box_sub->y
-		&& box_super->y + box_super->height >= box_sub->y + box_sub->height;
-}
-
-bool
 box_intersects(struct wlr_box *box_a, struct wlr_box *box_b)
 {
 	if (wlr_box_empty(box_a) || wlr_box_empty(box_b)) {
@@ -72,4 +60,15 @@ box_fit_within(int width, int height, struct wlr_box *bound)
 	box.y = bound->y + (bound->height - box.height) / 2;
 
 	return box;
+}
+
+struct wlr_fbox
+box_to_fbox(struct wlr_box *box)
+{
+	return (struct wlr_fbox){
+		.x = box->x,
+		.y = box->y,
+		.width = box->width,
+		.height = box->height,
+	};
 }

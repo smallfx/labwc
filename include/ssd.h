@@ -5,7 +5,7 @@
 #include <wayland-server-core.h>
 #include "common/border.h"
 
-#define SSD_EXTENDED_AREA 8
+struct wlr_cursor;
 
 /*
  * Shadows should start at a point inset from the actual window border, see
@@ -94,7 +94,6 @@ void ssd_update_title(struct ssd *ssd);
 void ssd_update_geometry(struct ssd *ssd);
 void ssd_destroy(struct ssd *ssd);
 void ssd_set_titlebar(struct ssd *ssd, bool enabled);
-void ssd_update_window_icon(struct ssd *ssd);
 
 void ssd_enable_keybind_inhibit_indicator(struct ssd *ssd, bool enable);
 void ssd_enable_shade(struct ssd *ssd, bool enable);
@@ -107,10 +106,8 @@ enum ssd_part_type ssd_button_get_type(const struct ssd_button *button);
 struct view *ssd_button_get_view(const struct ssd_button *button);
 
 /* Public SSD helpers */
-enum ssd_part_type ssd_at(const struct ssd *ssd,
-	struct wlr_scene *scene, double lx, double ly);
 enum ssd_part_type ssd_get_part_type(const struct ssd *ssd,
-	struct wlr_scene_node *node);
+	struct wlr_scene_node *node, struct wlr_cursor *cursor);
 uint32_t ssd_resize_edges(enum ssd_part_type type);
 bool ssd_part_contains(enum ssd_part_type whole, enum ssd_part_type candidate);
 enum ssd_mode ssd_mode_parse(const char *mode);

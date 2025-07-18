@@ -7,6 +7,7 @@
 #include "regions.h"
 #include "view.h"
 
+/* TODO: replace this with single lab_scene_rect */
 struct overlay_rect {
 	struct wlr_scene_tree *tree;
 
@@ -14,7 +15,7 @@ struct overlay_rect {
 	struct wlr_scene_rect *bg_rect;
 
 	bool border_enabled;
-	struct multi_rect *border_rect;
+	struct lab_scene_rect *border_rect;
 };
 
 struct overlay {
@@ -35,9 +36,14 @@ struct overlay {
 };
 
 void overlay_reconfigure(struct seat *seat);
+
 /* Calls overlay_hide() internally if there's no overlay to show */
 void overlay_update(struct seat *seat);
+
 /* This function must be called when server->grabbed_view is destroyed */
 void overlay_hide(struct seat *seat);
+
+/* This function is called to clean up the timer on exit */
+void overlay_finish(struct seat *seat);
 
 #endif

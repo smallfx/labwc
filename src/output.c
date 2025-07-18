@@ -158,7 +158,7 @@ output_apply_gamma(struct output *output)
 }
 
 static void
-output_frame_notify(struct wl_listener *listener, void *data)
+handle_output_frame(struct wl_listener *listener, void *data)
 {
 	/*
 	 * This function is called every time an output is ready to display a
@@ -181,7 +181,7 @@ output_frame_notify(struct wl_listener *listener, void *data)
 		 * TODO: This is a short term fix for issue #1667,
 		 *       a proper fix would require restructuring
 		 *       the life cycle of scene outputs, e.g.
-		 *       creating them on new_output_notify() only.
+		 *       creating them on handle_new_output() only.
 		 */
 		wlr_log(WLR_INFO, "Failed to render new frame: no scene-output");
 		return;
@@ -215,7 +215,7 @@ output_frame_notify(struct wl_listener *listener, void *data)
 }
 
 static void
-output_destroy_notify(struct wl_listener *listener, void *data)
+handle_output_destroy(struct wl_listener *listener, void *data)
 {
 	struct output *output = wl_container_of(listener, output, destroy);
 	struct seat *seat = &output->server->seat;
@@ -266,7 +266,7 @@ output_destroy_notify(struct wl_listener *listener, void *data)
 }
 
 static void
-output_request_state_notify(struct wl_listener *listener, void *data)
+handle_output_request_state(struct wl_listener *listener, void *data)
 {
 	/* This ensures nested backends can be resized */
 	struct output *output = wl_container_of(listener, output, request_state);
@@ -467,7 +467,7 @@ configure_new_output(struct server *server, struct output *output)
 }
 
 static void
-new_output_notify(struct wl_listener *listener, void *data)
+handle_new_output(struct wl_listener *listener, void *data)
 {
 	/*
 	 * This event is raised by the backend when a new output (aka display
@@ -502,11 +502,20 @@ new_output_notify(struct wl_listener *listener, void *data)
 	 * to use planes and present directly.
 	 * This is also useful for debugging the DRM parts of
 	 * another compositor.
+	 *
+	 * All drm leasing is disabled due to a UAF bug in wlroots.
+	 * We assume that the fix will be backported to 0.19.1 and thus
+	 * check for a version >= 0.19.1. See following link for the fix status:
+	 * https://gitlab.freedesktop.org/wlroots/wlroots/-/merge_requests/5104
+	 *
+	 * TODO: remove once labwc starts tracking 0.20.x and the fix has been merged.
 	 */
+#if LAB_WLR_VERSION_AT_LEAST(0, 19, 1)
 	if (server->drm_lease_manager && wlr_output_is_drm(wlr_output)) {
 		wlr_drm_lease_v1_manager_offer_output(
 			server->drm_lease_manager, wlr_output);
 	}
+#endif
 
 	/*
 	 * Don't configure any non-desktop displays, such as VR headsets;
@@ -534,15 +543,16 @@ new_output_notify(struct wl_listener *listener, void *data)
 
 	wl_list_insert(&server->outputs, &output->link);
 
-	output->destroy.notify = output_destroy_notify;
+	output->destroy.notify = handle_output_destroy;
 	wl_signal_add(&wlr_output->events.destroy, &output->destroy);
-	output->frame.notify = output_frame_notify;
+	output->frame.notify = handle_output_frame;
 	wl_signal_add(&wlr_output->events.frame, &output->frame);
 
-	output->request_state.notify = output_request_state_notify;
+	output->request_state.notify = handle_output_request_state;
 	wl_signal_add(&wlr_output->events.request_state, &output->request_state);
 
 	wl_list_init(&output->regions);
+	wl_array_init(&output->osd_scene.items);
 
 	/*
 	 * Create layer-trees (background, bottom, top and overlay) and
@@ -568,20 +578,24 @@ new_output_notify(struct wl_listener *listener, void *data)
 	 * Set the z-positions to achieve the following order (from top to
 	 * bottom):
 	 *	- session lock layer
-	 *	- compositor menu
+	 *	- window switcher osd
+	 *	- (compositor menu)
 	 *	- layer-shell popups
 	 *	- overlay layer
 	 *	- top layer
-	 *	- views
+	 *	- (views)
 	 *	- bottom layer
 	 *	- background layer
 	 */
 	wlr_scene_node_lower_to_bottom(&output->layer_tree[1]->node);
 	wlr_scene_node_lower_to_bottom(&output->layer_tree[0]->node);
-	wlr_scene_node_raise_to_top(&output->layer_tree[2]->node);
-	wlr_scene_node_raise_to_top(&output->layer_tree[3]->node);
-	wlr_scene_node_raise_to_top(&output->layer_popup_tree->node);
-	wlr_scene_node_raise_to_top(&server->menu_tree->node);
+
+	struct wlr_scene_node *menu_node = &server->menu_tree->node;
+	wlr_scene_node_place_below(&output->layer_tree[2]->node, menu_node);
+	wlr_scene_node_place_below(&output->layer_tree[3]->node, menu_node);
+	wlr_scene_node_place_below(&output->layer_popup_tree->node, menu_node);
+
+	wlr_scene_node_raise_to_top(&output->osd_tree->node);
 	wlr_scene_node_raise_to_top(&output->session_lock_tree->node);
 
 	if (rc.auto_enable_outputs) {
@@ -628,7 +642,7 @@ output_init(struct server *server)
 	server->gamma_control_manager_v1 =
 		wlr_gamma_control_manager_v1_create(server->wl_display);
 
-	server->new_output.notify = new_output_notify;
+	server->new_output.notify = handle_new_output;
 	wl_signal_add(&server->backend->events.new_output, &server->new_output);
 
 	/*
@@ -654,6 +668,15 @@ output_init(struct server *server)
 	wl_list_init(&server->outputs);
 
 	output_manager_init(server);
+}
+
+static void output_manager_finish(struct server *server);
+
+void
+output_finish(struct server *server)
+{
+	wl_list_remove(&server->new_output.link);
+	output_manager_finish(server);
 }
 
 static void
@@ -683,7 +706,7 @@ output_config_apply(struct server *server,
 		struct wlr_output *o = head->state.output;
 		struct output *output = output_from_wlr_output(server, o);
 		struct wlr_output_state *os = &output->pending;
-		bool output_enabled = head->state.enabled && !output->leased;
+		bool output_enabled = head->state.enabled;
 
 		wlr_output_state_set_enabled(os, output_enabled);
 		if (output_enabled) {
@@ -710,7 +733,7 @@ output_config_apply(struct server *server,
 		if (!output_state_commit(output)) {
 			/*
 			 * FIXME: This is only part of the story, we should revert
-			 *        all previously commited outputs as well here.
+			 *        all previously committed outputs as well here.
 			 *
 			 *        See https://github.com/labwc/labwc/pull/1528
 			 */
@@ -974,6 +997,15 @@ output_manager_init(struct server *server)
 		&server->gamma_control_set_gamma);
 }
 
+static void
+output_manager_finish(struct server *server)
+{
+	wl_list_remove(&server->output_layout_change.link);
+	wl_list_remove(&server->output_manager_apply.link);
+	wl_list_remove(&server->output_manager_test.link);
+	wl_list_remove(&server->gamma_control_set_gamma.link);
+}
+
 struct output *
 output_from_wlr_output(struct server *server, struct wlr_output *wlr_output)
 {
@@ -1071,7 +1103,7 @@ bool
 output_is_usable(struct output *output)
 {
 	/* output_is_usable(NULL) is safe and returns false */
-	return output && output->wlr_output->enabled && !output->leased;
+	return output && output->wlr_output->enabled;
 }
 
 /* returns true if usable area changed */
@@ -1154,10 +1186,16 @@ handle_output_power_manager_set_mode(struct wl_listener *listener, void *data)
 
 	switch (event->mode) {
 	case ZWLR_OUTPUT_POWER_V1_MODE_OFF:
+		if (!event->output->enabled) {
+			return;
+		}
 		wlr_output_state_set_enabled(&output->pending, false);
 		output_state_commit(output);
 		break;
 	case ZWLR_OUTPUT_POWER_V1_MODE_ON:
+		if (event->output->enabled) {
+			return;
+		}
 		wlr_output_state_set_enabled(&output->pending, true);
 		output_state_commit(output);
 		/*

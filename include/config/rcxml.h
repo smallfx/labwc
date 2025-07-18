@@ -73,6 +73,7 @@ struct rcxml {
 	bool reuse_output_mode;
 	enum view_placement_policy placement_policy;
 	bool xwayland_persistence;
+	bool primary_selection;
 	int placement_cascade_offset_x;
 	int placement_cascade_offset_y;
 
@@ -84,6 +85,7 @@ struct rcxml {
 	/* theme */
 	char *theme_name;
 	char *icon_theme_name;
+	char *fallback_app_icon_name;
 	struct wl_list title_buttons_left;
 	struct wl_list title_buttons_right;
 	int corner_radius;
@@ -91,6 +93,7 @@ struct rcxml {
 	bool title_layout_loaded;
 	bool ssd_keep_border;
 	bool shadows_enabled;
+	bool shadows_on_tiled;
 	struct font font_activewindow;
 	struct font font_inactivewindow;
 	struct font font_menuheader;
@@ -150,6 +153,8 @@ struct rcxml {
 
 	enum resize_indicator_mode resize_indicator;
 	bool resize_draw_contents;
+	int resize_corner_range;
+	int resize_minimum_area;
 
 	struct {
 		int popuptime;
@@ -174,6 +179,7 @@ struct rcxml {
 
 	/* Menu */
 	unsigned int menu_ignore_button_release_period;
+	bool menu_show_icons;
 
 	/* Magnifier */
 	int mag_width;

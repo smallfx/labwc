@@ -75,17 +75,29 @@ enum view_wants_focus {
 	/* View wants focus */
 	VIEW_WANTS_FOCUS_ALWAYS,
 	/*
-	 * View should be offered focus and may accept or decline
-	 * (a.k.a. ICCCM Globally Active input model). Labwc generally
-	 * avoids focusing these views automatically (e.g. when another
-	 * view on top is closed) but they may be focused by user action
-	 * (e.g. mouse click).
+	 * The following values apply only to XWayland views using the
+	 * Globally Active input model per the ICCCM. These views are
+	 * offered focus and will voluntarily accept or decline it.
+	 *
+	 * In some cases, labwc needs to decide in advance whether to
+	 * focus the view. For this purpose, these views are classified
+	 * (by a heuristic) as likely or unlikely to want focus. However,
+	 * it is still ultimately up to the client whether the view gets
+	 * focus or not.
 	 */
-	VIEW_WANTS_FOCUS_OFFER,
+	VIEW_WANTS_FOCUS_LIKELY,
+	VIEW_WANTS_FOCUS_UNLIKELY,
 };
 
+/*
+ * Window types are based on the NET_WM constants from X11. See:
+ *   https://specifications.freedesktop.org/wm-spec/1.4/ar01s05.html#id-1.6.7
+ *
+ * The enum constants are intended to match wlr_xwayland_net_wm_window_type.
+ * Redefining the same constants here may seem redundant, but is necessary
+ * to make them available even in builds with xwayland support disabled.
+ */
 enum window_type {
-	/* https://specifications.freedesktop.org/wm-spec/wm-spec-1.4.html#idm45649101374512 */
 	NET_WM_WINDOW_TYPE_DESKTOP = 0,
 	NET_WM_WINDOW_TYPE_DOCK,
 	NET_WM_WINDOW_TYPE_TOOLBAR,
@@ -140,20 +152,20 @@ struct view_impl {
 	 * minimizing we don't destroy the foreign toplevel handle).
 	 */
 	void (*unmap)(struct view *view, bool client_request);
-	void (*maximize)(struct view *view, bool maximize);
+	void (*maximize)(struct view *view, enum view_axis maximized);
 	void (*minimize)(struct view *view, bool minimize);
-	void (*move_to_front)(struct view *view);
-	void (*move_to_back)(struct view *view);
-	void (*shade)(struct view *view, bool shaded);
 	struct view *(*get_root)(struct view *self);
 	void (*append_children)(struct view *self, struct wl_array *children);
+	bool (*is_modal_dialog)(struct view *self);
 	struct view_size_hints (*get_size_hints)(struct view *self);
 	/* if not implemented, VIEW_WANTS_FOCUS_ALWAYS is assumed */
 	enum view_wants_focus (*wants_focus)(struct view *self);
+	void (*offer_focus)(struct view *self);
 	/* returns true if view reserves space at screen edge */
 	bool (*has_strut_partial)(struct view *self);
 	/* returns true if view declared itself a window type */
-	bool (*contains_window_type)(struct view *view, int32_t window_type);
+	bool (*contains_window_type)(struct view *view,
+		enum window_type window_type);
 	/* returns the client pid that this view belongs to */
 	pid_t (*get_pid)(struct view *view);
 };
@@ -193,7 +205,7 @@ struct view {
 	struct workspace *workspace;
 	struct wlr_surface *surface;
 	struct wlr_scene_tree *scene_tree;
-	struct wlr_scene_node *content_node;
+	struct wlr_scene_tree *content_tree;
 
 	bool mapped;
 	bool been_mapped;
@@ -258,7 +270,7 @@ struct view {
 	} resize_indicator;
 	struct resize_outlines {
 		struct wlr_box view_geo;
-		struct multi_rect *rect;
+		struct lab_scene_rect *rect;
 	} resize_outlines;
 
 	struct mappable mappable;
@@ -275,6 +287,12 @@ struct view {
 
 	struct foreign_toplevel *foreign_toplevel;
 
+	/* used by scaled_icon_buffer */
+	struct {
+		char *name;
+		struct wl_array buffers; /* struct lab_data_buffer * */
+	} icon;
+
 	struct {
 		struct wl_signal new_app_id;
 		struct wl_signal new_title;
@@ -283,6 +301,12 @@ struct view {
 		struct wl_signal minimized;
 		struct wl_signal fullscreened;
 		struct wl_signal activated;     /* bool *activated */
+		/*
+		 * This is emitted when app_id, or icon set via xdg_toplevel_icon
+		 * is updated. This is listened by scaled_icon_buffer.
+		 */
+		struct wl_signal set_icon;
+		struct wl_signal destroy;
 	} events;
 };
 
@@ -334,6 +358,7 @@ enum lab_view_criteria {
 	/* Negative criteria */
 	LAB_VIEW_CRITERIA_NO_ALWAYS_ON_TOP        = 1 << 6,
 	LAB_VIEW_CRITERIA_NO_SKIP_WINDOW_SWITCHER = 1 << 7,
+	LAB_VIEW_CRITERIA_NO_OMNIPRESENT          = 1 << 8,
 };
 
 /**
@@ -482,6 +507,12 @@ enum view_edge view_edge_invert(enum view_edge edge);
  */
 bool view_is_focusable(struct view *view);
 
+/*
+ * For use by desktop_focus_view() only - please do not call directly.
+ * See the description of VIEW_WANTS_FOCUS_OFFER for more information.
+ */
+void view_offer_focus(struct view *view);
+
 void mappable_connect(struct mappable *mappable, struct wlr_surface *surface,
 	wl_notify_func_t notify_map, wl_notify_func_t notify_unmap);
 void mappable_disconnect(struct mappable *mappable);
@@ -582,6 +613,14 @@ void view_move_to_front(struct view *view);
 void view_move_to_back(struct view *view);
 struct view *view_get_root(struct view *view);
 void view_append_children(struct view *view, struct wl_array *children);
+
+/**
+ * view_get_modal_dialog() - returns any modal dialog found among this
+ * view's children or siblings (or possibly this view itself). Applies
+ * only to xwayland views and always returns NULL for xdg-shell views.
+ */
+struct view *view_get_modal_dialog(struct view *view);
+
 bool view_on_output(struct view *view, struct output *output);
 
 /**
@@ -600,6 +639,10 @@ int view_get_min_width(void);
 
 void view_set_shade(struct view *view, bool shaded);
 void view_nnize_node(struct wlr_scene_node *node);
+
+/* Icon buffers set with this function are dropped later */
+void view_set_icon(struct view *view, const char *icon_name,
+	struct wl_array *buffers);
 
 struct view_size_hints view_get_size_hints(struct view *view);
 void view_adjust_size(struct view *view, int *w, int *h);

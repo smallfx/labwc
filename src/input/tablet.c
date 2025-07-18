@@ -13,11 +13,84 @@
 #include "config/mousebind.h"
 #include "input/cursor.h"
 #include "input/tablet.h"
-#include "input/tablet-tool.h"
 #include "input/tablet-pad.h"
 #include "labwc.h"
 #include "idle.h"
 #include "action.h"
+
+bool
+tablet_tool_has_focused_surface(struct seat *seat)
+{
+	struct drawing_tablet_tool *tool;
+	wl_list_for_each(tool, &seat->tablet_tools, link) {
+		if (tool->tool_v2->focused_surface) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void
+handle_set_cursor(struct wl_listener *listener, void *data)
+{
+	struct drawing_tablet_tool *tool =
+		wl_container_of(listener, tool, handlers.set_cursor);
+	struct wlr_tablet_v2_event_cursor *ev = data;
+
+	struct seat *seat = tool->seat;
+	struct wlr_seat_client *focused_client =
+		seat->seat->pointer_state.focused_client;
+
+	if (seat->server->input_mode != LAB_INPUT_STATE_PASSTHROUGH) {
+		return;
+	}
+
+	if (ev->seat_client != focused_client) {
+		return;
+	}
+
+	wlr_cursor_set_surface(seat->cursor, ev->surface,
+		ev->hotspot_x, ev->hotspot_y);
+}
+
+static void
+handle_tablet_tool_destroy(struct wl_listener *listener, void *data)
+{
+	struct drawing_tablet_tool *tool =
+		wl_container_of(listener, tool, handlers.destroy);
+
+	wl_list_remove(&tool->link);
+	wl_list_remove(&tool->handlers.set_cursor.link);
+	wl_list_remove(&tool->handlers.destroy.link);
+	free(tool);
+}
+
+static struct drawing_tablet_tool *
+tablet_tool_create(struct seat *seat,
+		struct wlr_tablet_tool *wlr_tablet_tool)
+{
+	wlr_log(WLR_DEBUG, "setting up tablet tool");
+	struct drawing_tablet_tool *tool = znew(*tool);
+	tool->seat = seat;
+	tool->tool_v2 =
+		wlr_tablet_tool_create(seat->server->tablet_manager,
+			seat->seat, wlr_tablet_tool);
+	wlr_tablet_tool->data = tool;
+	wlr_log(WLR_INFO, "tablet tool capabilities:%s%s%s%s%s%s",
+		wlr_tablet_tool->tilt ? " tilt" : "",
+		wlr_tablet_tool->pressure ? " pressure" : "",
+		wlr_tablet_tool->distance ? " distance" : "",
+		wlr_tablet_tool->rotation ? " rotation" : "",
+		wlr_tablet_tool->slider ? " slider" : "",
+		wlr_tablet_tool->wheel ? " wheel" : "");
+	CONNECT_SIGNAL(tool->tool_v2, &tool->handlers, set_cursor);
+	wl_signal_add(&wlr_tablet_tool->events.destroy, &tool->handlers.destroy);
+	tool->handlers.destroy.notify = handle_tablet_tool_destroy;
+
+	wl_list_insert(&seat->tablet_tools, &tool->link);
+	return tool;
+}
 
 static enum motion
 tool_motion_mode(enum motion motion, struct wlr_tablet_tool *tool)
@@ -119,12 +192,13 @@ adjust_for_motion_sensitivity(double motion_sensitivity, double *dx, double *dy)
 }
 
 static struct wlr_surface*
-tablet_get_coords(struct drawing_tablet *tablet, double *x, double *y, double *dx, double *dy)
+tablet_get_coords(struct drawing_tablet *tablet, struct drawing_tablet_tool *tool,
+		double *x, double *y, double *dx, double *dy)
 {
-	*x = tablet->x;
-	*y = tablet->y;
-	*dx = tablet->dx;
-	*dy = tablet->dy;
+	*x = tool->x;
+	*y = tool->y;
+	*dx = tool->dx;
+	*dy = tool->dy;
 	adjust_for_rotation(rc.tablet.rotation, x, y);
 	adjust_for_tablet_area(tablet->tablet->width_mm, tablet->tablet->height_mm,
 		rc.tablet.box, x, y);
@@ -133,11 +207,10 @@ tablet_get_coords(struct drawing_tablet *tablet, double *x, double *y, double *d
 
 	/*
 	 * Do not return a surface when mouse emulation is enforced. Not
-	 * having a surface or tablet tool (see handle_tablet_tool_proximity())
-	 * will trigger the fallback to cursor move/button emulation in the
-	 * tablet signal handlers.
+	 * having a surface will trigger the fallback to mouse emulation
+	 * in the tablet signal handlers.
 	 */
-	if (rc.tablet.force_mouse_emulation
+	if (rc.tablet.force_mouse_emulation || tool->force_mouse_emulation
 			|| !tablet->tablet_v2) {
 		return NULL;
 	}
@@ -146,7 +219,7 @@ tablet_get_coords(struct drawing_tablet *tablet, double *x, double *y, double *d
 
 	/* initialize here to avoid a maybe-uninitialized compiler warning */
 	double lx = -1, ly = -1;
-	switch (tablet->motion_mode) {
+	switch (tool->motion_mode) {
 	case LAB_TABLET_MOTION_ABSOLUTE:
 		wlr_cursor_absolute_to_layout_coords(tablet->seat->cursor,
 			tablet->wlr_input_device, *x, *y, &lx, &ly);
@@ -169,7 +242,7 @@ tablet_get_coords(struct drawing_tablet *tablet, double *x, double *y, double *d
 	/* find the surface and return it if it accepts tablet events */
 	struct wlr_surface *surface = lab_wlr_surface_from_node(node);
 
-	if (surface && !wlr_surface_accepts_tablet_v2(tablet->tablet_v2, surface)) {
+	if (surface && !wlr_surface_accepts_tablet_v2(surface, tablet->tablet_v2)) {
 		return NULL;
 	}
 	return surface;
@@ -188,7 +261,7 @@ notify_motion(struct drawing_tablet *tablet, struct drawing_tablet_tool *tool,
 			tablet->tablet_v2, surface);
 	}
 
-	switch (tablet->motion_mode) {
+	switch (tool->motion_mode) {
 	case LAB_TABLET_MOTION_ABSOLUTE:
 		wlr_cursor_warp_absolute(tablet->seat->cursor,
 			tablet->wlr_input_device, x, y);
@@ -253,48 +326,53 @@ handle_tablet_tool_proximity(struct wl_listener *listener, void *data)
 	idle_manager_notify_activity(tablet->seat->seat);
 	cursor_set_visible(tablet->seat, /* visible */ true);
 
-	if (ev->state == WLR_TABLET_TOOL_PROXIMITY_IN) {
-		tablet->motion_mode =
-			tool_motion_mode(rc.tablet_tool.motion, ev->tool);
-	}
-
-	/*
-	 * Reset relative coordinates, we don't want to move the
-	 * cursor on proximity-in for relative positioning.
-	 */
-	tablet->dx = 0;
-	tablet->dy = 0;
-
-	tablet->x = ev->x;
-	tablet->y = ev->y;
-
-	double x, y, dx, dy;
-	struct wlr_surface *surface = tablet_get_coords(tablet, &x, &y, &dx, &dy);
-
-	/*
-	 * Do not attempt to create a tablet tool when mouse emulation is
-	 * enforced. Not having a tool or tablet capable surface will trigger
-	 * the fallback to cursor move/button emulation in the tablet signal
-	 * handlers.
-	 */
-	if (!rc.tablet.force_mouse_emulation
-			&& tablet->seat->server->tablet_manager && !tool) {
+	if (!tool) {
 		/*
 		 * Unfortunately `wlr_tool` is only present in the events, so
 		 * use proximity for creating a `wlr_tablet_v2_tablet_tool`.
 		 */
-		tablet_tool_create(tablet->seat, ev->tool);
+		tool = tablet_tool_create(tablet->seat, ev->tool);
 	}
 
 	/*
-	 * We have a tablet tool (aka pen/stylus) and a tablet protocol capable
-	 * surface, let's send tablet notifications.
+	 * Enforce mouse emulation when the current tool is a tablet mouse.
+	 * Client support for tablet mouses in tablet mode is often incomplete
+	 * and no functionality is lost since those device do not support tool
+	 * specific axis like pressure or distance.
 	 */
-	if (tool && surface) {
-		if (tool->tool_v2 && ev->state == WLR_TABLET_TOOL_PROXIMITY_IN) {
+	tool->force_mouse_emulation = ev->tool->type == WLR_TABLET_TOOL_TYPE_MOUSE;
+	tool->motion_mode = tool_motion_mode(rc.tablet_tool.motion, tool->tool_v2->wlr_tool);
+
+	/*
+	 * Reset relative coordinates and axis, we don't want to move the
+	 * cursor on proximity-in for relative positioning.
+	 */
+	tool->dx = 0;
+	tool->dy = 0;
+	tool->distance = 0;
+	tool->pressure = 0;
+	tool->tilt_x = 0;
+	tool->tilt_y = 0;
+	tool->rotation = 0;
+	tool->slider = 0;
+	tool->wheel_delta = 0;
+
+	tool->x = ev->x;
+	tool->y = ev->y;
+
+	double x, y, dx, dy;
+	struct wlr_surface *surface = tablet_get_coords(tablet, tool, &x, &y, &dx, &dy);
+
+	/*
+	 * We are sending tablet notifications on the following conditions:
+	 * - the surface below the tip understands the tablet protocol
+	 * Note that surface is also NULL when mouse emulation is forced.
+	 */
+	if (surface) {
+		if (ev->state == WLR_TABLET_TOOL_PROXIMITY_IN) {
 			notify_motion(tablet, tool, surface, x, y, dx, dy, ev->time_msec);
 		}
-		if (tool->tool_v2 && ev->state == WLR_TABLET_TOOL_PROXIMITY_OUT) {
+		if (ev->state == WLR_TABLET_TOOL_PROXIMITY_OUT) {
 			wlr_tablet_v2_tablet_tool_notify_proximity_out(tool->tool_v2);
 		}
 	}
@@ -308,7 +386,7 @@ handle_tablet_tool_axis(struct wl_listener *listener, void *data)
 	struct wlr_tablet_tool_axis_event *ev = data;
 	struct drawing_tablet *tablet = ev->tablet->data;
 	struct drawing_tablet_tool *tool = ev->tool->data;
-	if (!tablet) {
+	if (!tablet || !tool) {
 		wlr_log(WLR_DEBUG, "tool axis event before tablet create");
 		return;
 	}
@@ -320,56 +398,55 @@ handle_tablet_tool_axis(struct wl_listener *listener, void *data)
 	 * Reset relative coordinates. If those axes aren't updated,
 	 * the delta is zero.
 	 */
-	tablet->dx = 0;
-	tablet->dy = 0;
-	tablet->tilt_x = 0;
-	tablet->tilt_y = 0;
+	tool->dx = 0;
+	tool->dy = 0;
+	tool->tilt_x = 0;
+	tool->tilt_y = 0;
 
 	if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_X) {
-		tablet->x = ev->x;
-		tablet->dx = ev->dx;
+		tool->x = ev->x;
+		tool->dx = ev->dx;
 	}
 	if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_Y) {
-		tablet->y = ev->y;
-		tablet->dy = ev->dy;
+		tool->y = ev->y;
+		tool->dy = ev->dy;
 	}
 	if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_DISTANCE) {
-		tablet->distance = ev->distance;
+		tool->distance = ev->distance;
 	}
 	if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_PRESSURE) {
-		tablet->pressure = ev->pressure;
+		tool->pressure = ev->pressure;
 	}
 	if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_TILT_X) {
-		tablet->tilt_x = ev->tilt_x;
+		tool->tilt_x = ev->tilt_x;
 	}
 	if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_TILT_Y) {
-		tablet->tilt_y = ev->tilt_y;
+		tool->tilt_y = ev->tilt_y;
 	}
 	if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_ROTATION) {
-		tablet->rotation = ev->rotation;
+		tool->rotation = ev->rotation;
 	}
 	if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_SLIDER) {
-		tablet->slider = ev->slider;
+		tool->slider = ev->slider;
 	}
 	if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_WHEEL) {
-		tablet->wheel_delta = ev->wheel_delta;
+		tool->wheel_delta = ev->wheel_delta;
 	}
 
 	double x, y, dx, dy;
-	struct wlr_surface *surface = tablet_get_coords(tablet, &x, &y, &dx, &dy);
+	struct wlr_surface *surface = tablet_get_coords(tablet, tool, &x, &y, &dx, &dy);
 
 	/*
 	 * We are sending tablet notifications on the following conditions:
-	 * - a tablet tool (aka pen/stylus) had been created earlier on
-	 *   proximity-in
 	 * - there is no current tip or button press (e.g. from out-of-surface
 	 *   scrolling) that started on a non tablet capable surface
 	 * - the surface below the tip understands the tablet protocol and is in
 	 *   pass through state (notifications are allowed to the client), or we
 	 *   don't have a tablet-capable surface but are still having an active
 	 *   grab (e.g. from out-of-surface scrolling).
+	 * Note that surface is also NULL when mouse emulation is forced.
 	 */
-	if (tool && !is_down_mouse_emulation && ((surface
+	if (!is_down_mouse_emulation && ((surface
 			&& tablet->seat->server->input_mode == LAB_INPUT_STATE_PASSTHROUGH)
 			|| wlr_tablet_tool_v2_has_implicit_grab(tool->tool_v2))) {
 		/* motion seems to be supported by all tools */
@@ -378,11 +455,11 @@ handle_tablet_tool_axis(struct wl_listener *listener, void *data)
 		/* notify about other axis based on tool capabilities */
 		if (ev->tool->distance) {
 			wlr_tablet_v2_tablet_tool_notify_distance(tool->tool_v2,
-				tablet->distance);
+				tool->distance);
 		}
 		if (ev->tool->pressure) {
 			wlr_tablet_v2_tablet_tool_notify_pressure(tool->tool_v2,
-				tablet->pressure);
+				tool->pressure);
 		}
 		if (ev->tool->tilt) {
 			/*
@@ -396,8 +473,8 @@ handle_tablet_tool_axis(struct wl_listener *listener, void *data)
 			 * positive x or y axis."
 			 * Based on that we only need to apply rotation but no area transformation.
 			 */
-			double tilt_x = tablet->tilt_x;
-			double tilt_y = tablet->tilt_y;
+			double tilt_x = tool->tilt_x;
+			double tilt_y = tool->tilt_y;
 			adjust_for_rotation_relative(rc.tablet.rotation, &tilt_x, &tilt_y);
 
 			wlr_tablet_v2_tablet_tool_notify_tilt(tool->tool_v2,
@@ -405,24 +482,24 @@ handle_tablet_tool_axis(struct wl_listener *listener, void *data)
 		}
 		if (ev->tool->rotation) {
 			wlr_tablet_v2_tablet_tool_notify_rotation(tool->tool_v2,
-				tablet->rotation);
+				tool->rotation);
 		}
 		if (ev->tool->slider) {
 			wlr_tablet_v2_tablet_tool_notify_slider(tool->tool_v2,
-				tablet->slider);
+				tool->slider);
 		}
 		if (ev->tool->wheel) {
 			wlr_tablet_v2_tablet_tool_notify_wheel(tool->tool_v2,
-				tablet->wheel_delta, 0);
+				tool->wheel_delta, 0);
 		}
 	} else {
 		if (ev->updated_axes & (WLR_TABLET_TOOL_AXIS_X | WLR_TABLET_TOOL_AXIS_Y)) {
-			if (tool && tool->tool_v2->focused_surface) {
+			if (tool->tool_v2 && tool->tool_v2->focused_surface) {
 				wlr_tablet_v2_tablet_tool_notify_proximity_out(
 					tool->tool_v2);
 			}
 
-			switch (tablet->motion_mode) {
+			switch (tool->motion_mode) {
 			case LAB_TABLET_MOTION_ABSOLUTE:
 				cursor_emulate_move_absolute(tablet->seat,
 					&ev->tablet->base,
@@ -434,6 +511,21 @@ handle_tablet_tool_axis(struct wl_listener *listener, void *data)
 					dx, dy, ev->time_msec);
 				break;
 			}
+		}
+		if (ev->updated_axes & WLR_TABLET_TOOL_AXIS_WHEEL) {
+			/*
+			 * libinput reports delta_discrete for tablet tool mouses,
+			 * but unfortunately wlroots doesn't expose it. That said,
+			 * based on the libinput source (tablet_device_has_axis()),
+			 * we only have to deal with non-high-res mouses here, so
+			 * it is relatively safe to set a fixed value.
+			 */
+			int delta_discrete = tool->wheel_delta >= 0 ? 1 : -1;
+			cursor_emulate_axis(tablet->seat, &ev->tablet->base,
+				WL_POINTER_AXIS_VERTICAL_SCROLL,
+				tool->wheel_delta,
+				WLR_POINTER_AXIS_DISCRETE_STEP * delta_discrete,
+				WL_POINTER_AXIS_SOURCE_WHEEL, ev->time_msec);
 		}
 	}
 }
@@ -466,7 +558,7 @@ handle_tablet_tool_tip(struct wl_listener *listener, void *data)
 	struct wlr_tablet_tool_tip_event *ev = data;
 	struct drawing_tablet *tablet = ev->tablet->data;
 	struct drawing_tablet_tool *tool = ev->tool->data;
-	if (!tablet) {
+	if (!tablet || !tool) {
 		wlr_log(WLR_DEBUG, "tool tip event before tablet create");
 		return;
 	}
@@ -475,20 +567,19 @@ handle_tablet_tool_tip(struct wl_listener *listener, void *data)
 	cursor_set_visible(tablet->seat, /* visible */ true);
 
 	double x, y, dx, dy;
-	struct wlr_surface *surface = tablet_get_coords(tablet, &x, &y, &dx, &dy);
+	struct wlr_surface *surface = tablet_get_coords(tablet, tool, &x, &y, &dx, &dy);
 
 	uint32_t button = tablet_get_mapped_button(BTN_TOOL_PEN);
 
 	/*
 	 * We are sending tablet notifications on the following conditions:
-	 * - a tablet tool (aka pen/stylus) had been created earlier on
-	 *   proximity-in
 	 * - there is no current tip or button press (e.g. from out-of-surface
 	 *   scrolling) that started on a non tablet capable surface
 	 * - the surface below tip understands the tablet protocol, or we don't
 	 *   have a tablet-capable surface but are still having an active grab.
+	 * Note that surface is also NULL when mouse emulation is forced.
 	 */
-	if (tool && !is_down_mouse_emulation && (surface
+	if (!is_down_mouse_emulation && (surface
 			|| wlr_tablet_tool_v2_has_implicit_grab(tool->tool_v2))) {
 		uint32_t stylus_button = to_stylus_button(button);
 		if (stylus_button != BTN_TOOL_PEN) {
@@ -546,7 +637,7 @@ handle_tablet_tool_button(struct wl_listener *listener, void *data)
 	struct wlr_tablet_tool_button_event *ev = data;
 	struct drawing_tablet *tablet = ev->tablet->data;
 	struct drawing_tablet_tool *tool = ev->tool->data;
-	if (!tablet) {
+	if (!tablet || !tool) {
 		wlr_log(WLR_DEBUG, "tool button event before tablet create");
 		return;
 	}
@@ -555,19 +646,18 @@ handle_tablet_tool_button(struct wl_listener *listener, void *data)
 	cursor_set_visible(tablet->seat, /* visible */ true);
 
 	double x, y, dx, dy;
-	struct wlr_surface *surface = tablet_get_coords(tablet, &x, &y, &dx, &dy);
+	struct wlr_surface *surface = tablet_get_coords(tablet, tool, &x, &y, &dx, &dy);
 
 	uint32_t button = tablet_get_mapped_button(ev->button);
 
 	/*
 	 * We are sending tablet notifications on the following conditions:
-	 * - a tablet tool (aka pen/stylus) had been created earlier on
-	 *   proximity-in
 	 * - there is no current tip or button press (e.g. out of surface
 	 *   scrolling) that started on a non tablet capable surface
 	 * - the surface below the tip understands the tablet protocol.
+	 * Note that surface is also NULL when mouse emulation is forced.
 	 */
-	if (tool && !is_down_mouse_emulation && surface) {
+	if (!is_down_mouse_emulation && surface) {
 		if (button && ev->state == WLR_BUTTON_PRESSED) {
 			struct view *view = view_from_wlr_surface(surface);
 			struct mousebind *mousebind;
@@ -632,15 +722,6 @@ tablet_create(struct seat *seat, struct wlr_input_device *wlr_device)
 		tablet->tablet_v2 = wlr_tablet_create(
 			seat->server->tablet_manager, seat->seat, wlr_device);
 	}
-	tablet->x = 0.0;
-	tablet->y = 0.0;
-	tablet->distance = 0.0;
-	tablet->pressure = 0.0;
-	tablet->tilt_x = 0.0;
-	tablet->tilt_y = 0.0;
-	tablet->rotation = 0.0;
-	tablet->slider = 0.0;
-	tablet->wheel_delta = 0.0;
 	wlr_log(WLR_INFO, "tablet dimensions: %.2fmm x %.2fmm",
 		tablet->tablet->width_mm, tablet->tablet->height_mm);
 	CONNECT_SIGNAL(wlr_device, &tablet->handlers, destroy);

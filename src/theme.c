@@ -26,7 +26,6 @@
 #include "common/match.h"
 #include "common/mem.h"
 #include "common/parse-bool.h"
-#include "common/parse-double.h"
 #include "common/string-helpers.h"
 #include "config/rcxml.h"
 #include "img/img.h"
@@ -53,7 +52,7 @@ struct rounded_corner_ctx {
 	struct wlr_box *box;
 	double radius;
 	double line_width;
-	float *fill_color;
+	cairo_pattern_t *fill_pattern;
 	float *border_color;
 	enum corner corner;
 };
@@ -292,13 +291,7 @@ load_buttons(struct theme *theme)
 		.name = "menu",
 		.type = LAB_SSD_BUTTON_WINDOW_MENU,
 		.state_set = 0,
-		.fallback_button = (const char[]){ 0x00, 0x18, 0x3c, 0x3c, 0x18, 0x00 },
-	}, {
-		/* menu icon is loaded again as a fallback of window icon */
-		.name = "menu",
-		.type = LAB_SSD_BUTTON_WINDOW_ICON,
-		.state_set = 0,
-		.fallback_button = (const char[]){ 0x00, 0x18, 0x3c, 0x3c, 0x18, 0x00 },
+		.fallback_button = (const char[]){ 0x00, 0x21, 0x33, 0x1E, 0x0C, 0x00 },
 	}, {
 		.name = "iconify",
 		.type = LAB_SSD_BUTTON_ICONIFY,
@@ -342,12 +335,6 @@ load_buttons(struct theme *theme)
 	}, {
 		.name = "menu_hover",
 		.type = LAB_SSD_BUTTON_WINDOW_MENU,
-		.state_set = LAB_BS_HOVERD,
-		/* no fallback (non-hover variant is used instead) */
-	}, {
-		/* menu_hover icon is loaded again as a fallback of window icon */
-		.name = "menu_hover",
-		.type = LAB_SSD_BUTTON_WINDOW_ICON,
 		.state_set = LAB_BS_HOVERD,
 		/* no fallback (non-hover variant is used instead) */
 	}, {
@@ -425,15 +412,26 @@ hex_to_dec(char c)
 static void
 parse_hexstr(const char *hex, float *rgba)
 {
-	if (!hex || hex[0] != '#' || strlen(hex) < 7) {
+	if (hex[0] != '#') {
 		return;
 	}
-	rgba[0] = (hex_to_dec(hex[1]) * 16 + hex_to_dec(hex[2])) / 255.0;
-	rgba[1] = (hex_to_dec(hex[3]) * 16 + hex_to_dec(hex[4])) / 255.0;
-	rgba[2] = (hex_to_dec(hex[5]) * 16 + hex_to_dec(hex[6])) / 255.0;
-	rgba[3] = 1.0;
 
 	size_t len = strlen(hex);
+	if (len == 4) {
+		/* #fff is shorthand for #f0f0f0, per theme spec */
+		rgba[0] = (hex_to_dec(hex[1]) * 16) / 255.0;
+		rgba[1] = (hex_to_dec(hex[2]) * 16) / 255.0;
+		rgba[2] = (hex_to_dec(hex[3]) * 16) / 255.0;
+	} else if (len >= 7) {
+		rgba[0] = (hex_to_dec(hex[1]) * 16 + hex_to_dec(hex[2])) / 255.0;
+		rgba[1] = (hex_to_dec(hex[3]) * 16 + hex_to_dec(hex[4])) / 255.0;
+		rgba[2] = (hex_to_dec(hex[5]) * 16 + hex_to_dec(hex[6])) / 255.0;
+	} else {
+		return;
+	}
+
+	rgba[3] = 1.0;
+
 	if (len >= 9 && hex[7] == ' ') {
 		/* Deprecated #aabbcc 100 alpha encoding to support openbox themes */
 		rgba[3] = atoi(hex + 8) / 100.0;
@@ -462,6 +460,60 @@ parse_hexstrs(const char *hexes, float colors[3][4])
 		parse_hexstr(elements[i], colors[i]);
 	}
 	g_strfreev(elements);
+}
+
+static void
+parse_color(const char *str, float *rgba)
+{
+	if (str[0] == '#') {
+		parse_hexstr(str, rgba);
+	} else if (!strncasecmp(str, "rgb:", 4)) {
+		size_t len = strlen(str);
+		if (len == 9 && str[5] == '/' && str[7] == '/') {
+			/* rgb:R/G/B */
+			rgba[0] = (hex_to_dec(str[4]) * 16) / 255.0;
+			rgba[1] = (hex_to_dec(str[6]) * 16) / 255.0;
+			rgba[2] = (hex_to_dec(str[8]) * 16) / 255.0;
+			rgba[3] = 1.0;
+		} else if (len == 12 && str[6] == '/' && str[9] == '/') {
+			/* rgb:RR/GG/BB */
+			rgba[0] = (hex_to_dec(str[4]) * 16 + hex_to_dec(str[5])) / 255.0;
+			rgba[1] = (hex_to_dec(str[7]) * 16 + hex_to_dec(str[8])) / 255.0;
+			rgba[2] = (hex_to_dec(str[10]) * 16 + hex_to_dec(str[11])) / 255.0;
+			rgba[3] = 1.0;
+		}
+	} else {
+		uint32_t argb = 0;
+		if (lookup_named_color(str, &argb)) {
+			rgba[0] = ((argb >> 16) & 0xFF) / 255.0;
+			rgba[1] = ((argb >> 8) & 0xFF) / 255.0;
+			rgba[2] = (argb & 0xFF) / 255.0;
+			rgba[3] = 1.0;
+		}
+	}
+}
+
+static enum lab_gradient
+parse_gradient(const char *str)
+{
+	/*
+	 * Parsing of "texture" strings is very loose, following Openbox:
+	 * just a case-insensitive match of substrings of interest, with
+	 * no regard for ordering nor whitespace.
+	 */
+	char *lower = g_ascii_strdown(str, -1);
+	enum lab_gradient gradient = LAB_GRADIENT_NONE;
+
+	if (strstr(lower, "gradient")) {
+		if (strstr(lower, "splitvertical")) {
+			gradient = LAB_GRADIENT_SPLITVERTICAL;
+		} else if (strstr(lower, "vertical")) {
+			gradient = LAB_GRADIENT_VERTICAL;
+		}
+	}
+
+	g_free(lower);
+	return gradient;
 }
 
 static enum lab_justification
@@ -500,8 +552,16 @@ theme_builtin(struct theme *theme, struct server *server)
 
 	parse_hexstr("#ff0000", theme->window_toggled_keybinds_color);
 
-	parse_hexstr("#e1dedb", theme->window[THEME_ACTIVE].title_bg_color);
-	parse_hexstr("#f6f5f4", theme->window[THEME_INACTIVE].title_bg_color);
+	theme->window[THEME_ACTIVE].title_bg.gradient = LAB_GRADIENT_NONE;
+	theme->window[THEME_INACTIVE].title_bg.gradient = LAB_GRADIENT_NONE;
+	parse_hexstr("#e1dedb", theme->window[THEME_ACTIVE].title_bg.color);
+	parse_hexstr("#f6f5f4", theme->window[THEME_INACTIVE].title_bg.color);
+	theme->window[THEME_ACTIVE].title_bg.color_split_to[0] = FLT_MIN;
+	theme->window[THEME_INACTIVE].title_bg.color_split_to[0] = FLT_MIN;
+	theme->window[THEME_ACTIVE].title_bg.color_to[0] = FLT_MIN;
+	theme->window[THEME_INACTIVE].title_bg.color_to[0] = FLT_MIN;
+	theme->window[THEME_ACTIVE].title_bg.color_to_split_to[0] = FLT_MIN;
+	theme->window[THEME_INACTIVE].title_bg.color_to_split_to[0] = FLT_MIN;
 
 	parse_hexstr("#000000", theme->window[THEME_ACTIVE].label_text_color);
 	parse_hexstr("#000000", theme->window[THEME_INACTIVE].label_text_color);
@@ -554,6 +614,7 @@ theme_builtin(struct theme *theme, struct server *server)
 	theme->osd_window_switcher_item_padding_x = 10;
 	theme->osd_window_switcher_item_padding_y = 1;
 	theme->osd_window_switcher_item_active_border_width = 2;
+	theme->osd_window_switcher_item_icon_size = -1;
 
 	/* inherit settings in post_processing() if not set elsewhere */
 	theme->osd_window_switcher_preview_border_width = INT_MIN;
@@ -562,6 +623,7 @@ theme_builtin(struct theme *theme, struct server *server)
 
 	theme->osd_workspace_switcher_boxes_width = 20;
 	theme->osd_workspace_switcher_boxes_height = 20;
+	theme->osd_workspace_switcher_boxes_border_width = 2;
 
 	/* inherit settings in post_processing() if not set elsewhere */
 	theme->osd_bg_color[0] = FLT_MIN;
@@ -641,33 +703,57 @@ entry(struct theme *theme, const char *key, const char *value)
 	}
 
 	if (match_glob(key, "window.active.border.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE].border_color);
+		parse_color(value, theme->window[THEME_ACTIVE].border_color);
 	}
 	if (match_glob(key, "window.inactive.border.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE].border_color);
+		parse_color(value, theme->window[THEME_INACTIVE].border_color);
 	}
 	/* border.color is obsolete, but handled for backward compatibility */
 	if (match_glob(key, "border.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE].border_color);
-		parse_hexstr(value, theme->window[THEME_INACTIVE].border_color);
+		parse_color(value, theme->window[THEME_ACTIVE].border_color);
+		parse_color(value, theme->window[THEME_INACTIVE].border_color);
 	}
 
 	if (match_glob(key, "window.active.indicator.toggled-keybind.color")) {
-		parse_hexstr(value, theme->window_toggled_keybinds_color);
+		parse_color(value, theme->window_toggled_keybinds_color);
 	}
 
+	if (match_glob(key, "window.active.title.bg")) {
+		theme->window[THEME_ACTIVE].title_bg.gradient = parse_gradient(value);
+	}
+	if (match_glob(key, "window.inactive.title.bg")) {
+		theme->window[THEME_INACTIVE].title_bg.gradient = parse_gradient(value);
+	}
 	if (match_glob(key, "window.active.title.bg.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE].title_bg_color);
+		parse_color(value, theme->window[THEME_ACTIVE].title_bg.color);
 	}
 	if (match_glob(key, "window.inactive.title.bg.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE].title_bg_color);
+		parse_color(value, theme->window[THEME_INACTIVE].title_bg.color);
+	}
+	if (match_glob(key, "window.active.title.bg.color.splitTo")) {
+		parse_color(value, theme->window[THEME_ACTIVE].title_bg.color_split_to);
+	}
+	if (match_glob(key, "window.inactive.title.bg.color.splitTo")) {
+		parse_color(value, theme->window[THEME_INACTIVE].title_bg.color_split_to);
+	}
+	if (match_glob(key, "window.active.title.bg.colorTo")) {
+		parse_color(value, theme->window[THEME_ACTIVE].title_bg.color_to);
+	}
+	if (match_glob(key, "window.inactive.title.bg.colorTo")) {
+		parse_color(value, theme->window[THEME_INACTIVE].title_bg.color_to);
+	}
+	if (match_glob(key, "window.active.title.bg.colorTo.splitTo")) {
+		parse_color(value, theme->window[THEME_ACTIVE].title_bg.color_to_split_to);
+	}
+	if (match_glob(key, "window.inactive.title.bg.colorTo.splitTo")) {
+		parse_color(value, theme->window[THEME_INACTIVE].title_bg.color_to_split_to);
 	}
 
 	if (match_glob(key, "window.active.label.text.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE].label_text_color);
+		parse_color(value, theme->window[THEME_ACTIVE].label_text_color);
 	}
 	if (match_glob(key, "window.inactive.label.text.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE].label_text_color);
+		parse_color(value, theme->window[THEME_INACTIVE].label_text_color);
 	}
 	if (match_glob(key, "window.label.text.justify")) {
 		theme->window_label_text_justify = parse_justification(value);
@@ -702,69 +788,69 @@ entry(struct theme *theme, const char *key, const char *value)
 	if (match_glob(key, "window.active.button.unpressed.image.color")) {
 		for (enum ssd_part_type type = LAB_SSD_BUTTON_FIRST;
 				type <= LAB_SSD_BUTTON_LAST; type++) {
-			parse_hexstr(value,
+			parse_color(value,
 				theme->window[THEME_ACTIVE].button_colors[type]);
 		}
 	}
 	if (match_glob(key, "window.inactive.button.unpressed.image.color")) {
 		for (enum ssd_part_type type = LAB_SSD_BUTTON_FIRST;
 				type <= LAB_SSD_BUTTON_LAST; type++) {
-			parse_hexstr(value,
+			parse_color(value,
 				theme->window[THEME_INACTIVE].button_colors[type]);
 		}
 	}
 
 	/* individual buttons */
 	if (match_glob(key, "window.active.button.menu.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE]
+		parse_color(value, theme->window[THEME_ACTIVE]
 			.button_colors[LAB_SSD_BUTTON_WINDOW_MENU]);
-		parse_hexstr(value, theme->window[THEME_ACTIVE]
+		parse_color(value, theme->window[THEME_ACTIVE]
 			.button_colors[LAB_SSD_BUTTON_WINDOW_ICON]);
 	}
 	if (match_glob(key, "window.active.button.iconify.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE]
+		parse_color(value, theme->window[THEME_ACTIVE]
 			.button_colors[LAB_SSD_BUTTON_ICONIFY]);
 	}
 	if (match_glob(key, "window.active.button.max.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE]
+		parse_color(value, theme->window[THEME_ACTIVE]
 			.button_colors[LAB_SSD_BUTTON_MAXIMIZE]);
 	}
 	if (match_glob(key, "window.active.button.shade.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE]
+		parse_color(value, theme->window[THEME_ACTIVE]
 			.button_colors[LAB_SSD_BUTTON_SHADE]);
 	}
 	if (match_glob(key, "window.active.button.desk.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE]
+		parse_color(value, theme->window[THEME_ACTIVE]
 			.button_colors[LAB_SSD_BUTTON_OMNIPRESENT]);
 	}
 	if (match_glob(key, "window.active.button.close.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE]
+		parse_color(value, theme->window[THEME_ACTIVE]
 			.button_colors[LAB_SSD_BUTTON_CLOSE]);
 	}
 	if (match_glob(key, "window.inactive.button.menu.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE]
+		parse_color(value, theme->window[THEME_INACTIVE]
 			.button_colors[LAB_SSD_BUTTON_WINDOW_MENU]);
-		parse_hexstr(value, theme->window[THEME_INACTIVE]
+		parse_color(value, theme->window[THEME_INACTIVE]
 			.button_colors[LAB_SSD_BUTTON_WINDOW_ICON]);
 	}
 	if (match_glob(key, "window.inactive.button.iconify.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE]
+		parse_color(value, theme->window[THEME_INACTIVE]
 			.button_colors[LAB_SSD_BUTTON_ICONIFY]);
 	}
 	if (match_glob(key, "window.inactive.button.max.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE]
+		parse_color(value, theme->window[THEME_INACTIVE]
 			.button_colors[LAB_SSD_BUTTON_MAXIMIZE]);
 	}
 	if (match_glob(key, "window.inactive.button.shade.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE]
+		parse_color(value, theme->window[THEME_INACTIVE]
 			.button_colors[LAB_SSD_BUTTON_SHADE]);
 	}
 	if (match_glob(key, "window.inactive.button.desk.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE]
+		parse_color(value, theme->window[THEME_INACTIVE]
 			.button_colors[LAB_SSD_BUTTON_OMNIPRESENT]);
 	}
 	if (match_glob(key, "window.inactive.button.close.unpressed.image.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE]
+		parse_color(value, theme->window[THEME_INACTIVE]
 			.button_colors[LAB_SSD_BUTTON_CLOSE]);
 	}
 
@@ -778,10 +864,10 @@ entry(struct theme *theme, const char *key, const char *value)
 			value, "window.inactive.shadow.size");
 	}
 	if (match_glob(key, "window.active.shadow.color")) {
-		parse_hexstr(value, theme->window[THEME_ACTIVE].shadow_color);
+		parse_color(value, theme->window[THEME_ACTIVE].shadow_color);
 	}
 	if (match_glob(key, "window.inactive.shadow.color")) {
-		parse_hexstr(value, theme->window[THEME_INACTIVE].shadow_color);
+		parse_color(value, theme->window[THEME_INACTIVE].shadow_color);
 	}
 
 	if (match_glob(key, "menu.overlap.x")) {
@@ -803,7 +889,7 @@ entry(struct theme *theme, const char *key, const char *value)
 			value, "menu.border.width");
 	}
 	if (match_glob(key, "menu.border.color")) {
-		parse_hexstr(value, theme->menu_border_color);
+		parse_color(value, theme->menu_border_color);
 	}
 
 	if (match_glob(key, "menu.items.padding.x")) {
@@ -815,16 +901,16 @@ entry(struct theme *theme, const char *key, const char *value)
 			value, "menu.items.padding.y");
 	}
 	if (match_glob(key, "menu.items.bg.color")) {
-		parse_hexstr(value, theme->menu_items_bg_color);
+		parse_color(value, theme->menu_items_bg_color);
 	}
 	if (match_glob(key, "menu.items.text.color")) {
-		parse_hexstr(value, theme->menu_items_text_color);
+		parse_color(value, theme->menu_items_text_color);
 	}
 	if (match_glob(key, "menu.items.active.bg.color")) {
-		parse_hexstr(value, theme->menu_items_active_bg_color);
+		parse_color(value, theme->menu_items_active_bg_color);
 	}
 	if (match_glob(key, "menu.items.active.text.color")) {
-		parse_hexstr(value, theme->menu_items_active_text_color);
+		parse_color(value, theme->menu_items_active_text_color);
 	}
 
 	if (match_glob(key, "menu.separator.width")) {
@@ -840,28 +926,28 @@ entry(struct theme *theme, const char *key, const char *value)
 			value, "menu.separator.padding.height");
 	}
 	if (match_glob(key, "menu.separator.color")) {
-		parse_hexstr(value, theme->menu_separator_color);
+		parse_color(value, theme->menu_separator_color);
 	}
 
 	if (match_glob(key, "menu.title.bg.color")) {
-		parse_hexstr(value, theme->menu_title_bg_color);
+		parse_color(value, theme->menu_title_bg_color);
 	}
 	if (match_glob(key, "menu.title.text.justify")) {
 		theme->menu_title_text_justify = parse_justification(value);
 	}
 	if (match_glob(key, "menu.title.text.color")) {
-		parse_hexstr(value, theme->menu_title_text_color);
+		parse_color(value, theme->menu_title_text_color);
 	}
 
 	if (match_glob(key, "osd.bg.color")) {
-		parse_hexstr(value, theme->osd_bg_color);
+		parse_color(value, theme->osd_bg_color);
 	}
 	if (match_glob(key, "osd.border.width")) {
 		theme->osd_border_width = get_int_if_positive(
 			value, "osd.border.width");
 	}
 	if (match_glob(key, "osd.border.color")) {
-		parse_hexstr(value, theme->osd_border_color);
+		parse_color(value, theme->osd_border_color);
 	}
 	if (match_glob(key, "osd.window-switcher.width")) {
 		if (strrchr(value, '%')) {
@@ -891,6 +977,11 @@ entry(struct theme *theme, const char *key, const char *value)
 			get_int_if_positive(
 				value, "osd.window-switcher.item.active.border.width");
 	}
+	if (match_glob(key, "osd.window-switcher.item.icon.size")) {
+		theme->osd_window_switcher_item_icon_size =
+			get_int_if_positive(
+				value, "osd.window-switcher.item.icon.size");
+	}
 	if (match_glob(key, "osd.window-switcher.preview.border.width")) {
 		theme->osd_window_switcher_preview_border_width =
 			get_int_if_positive(
@@ -909,8 +1000,13 @@ entry(struct theme *theme, const char *key, const char *value)
 			get_int_if_positive(
 				value, "osd.workspace-switcher.boxes.height");
 	}
+	if (match_glob(key, "osd.workspace-switcher.boxes.border.width")) {
+		theme->osd_workspace_switcher_boxes_border_width =
+			get_int_if_positive(
+				value, "osd.workspace-switcher.boxes.border.width");
+	}
 	if (match_glob(key, "osd.label.text.color")) {
-		parse_hexstr(value, theme->osd_label_text_color);
+		parse_color(value, theme->osd_label_text_color);
 	}
 	if (match_glob(key, "snapping.overlay.region.bg.enabled")) {
 		set_bool(value, &theme->snapping_overlay_region.bg_enabled);
@@ -925,10 +1021,10 @@ entry(struct theme *theme, const char *key, const char *value)
 		set_bool(value, &theme->snapping_overlay_edge.border_enabled);
 	}
 	if (match_glob(key, "snapping.overlay.region.bg.color")) {
-		parse_hexstr(value, theme->snapping_overlay_region.bg_color);
+		parse_color(value, theme->snapping_overlay_region.bg_color);
 	}
 	if (match_glob(key, "snapping.overlay.edge.bg.color")) {
-		parse_hexstr(value, theme->snapping_overlay_edge.bg_color);
+		parse_color(value, theme->snapping_overlay_edge.bg_color);
 	}
 	if (match_glob(key, "snapping.overlay.region.border.width")) {
 		theme->snapping_overlay_region.border_width = get_int_if_positive(
@@ -950,7 +1046,7 @@ entry(struct theme *theme, const char *key, const char *value)
 			value, "magnifier.border.width");
 	}
 	if (match_glob(key, "magnifier.border.color")) {
-		parse_hexstr(value, theme->mag_border_color);
+		parse_color(value, theme->mag_border_color);
 	}
 }
 
@@ -1067,9 +1163,23 @@ rounded_rect(struct rounded_corner_ctx *ctx)
 	}
 	cairo_close_path(cairo);
 	cairo_set_operator(cairo, CAIRO_OPERATOR_SOURCE);
-	set_cairo_color(cairo, ctx->fill_color);
+	/*
+	 * We need to offset the fill pattern vertically by the border
+	 * width to line up with the rest of the titlebar. This is done
+	 * by applying a transformation matrix to the pattern temporarily.
+	 * It would be better to copy the pattern, but cairo does not
+	 * provide a simple way to this.
+	 */
+	cairo_matrix_t matrix;
+	cairo_matrix_init_translate(&matrix, 0, -ctx->line_width);
+	cairo_pattern_set_matrix(ctx->fill_pattern, &matrix);
+	cairo_set_source(cairo, ctx->fill_pattern);
 	cairo_fill_preserve(cairo);
 	cairo_stroke(cairo);
+
+	/* Reset the fill pattern transformation matrix afterward */
+	cairo_matrix_init_identity(&matrix);
+	cairo_pattern_set_matrix(ctx->fill_pattern, &matrix);
 
 	/*
 	 * Stroke horizontal and vertical borders, shown by Xs and Ys
@@ -1174,6 +1284,77 @@ out:
 }
 
 static void
+add_color_stop_rgba_premult(cairo_pattern_t *pattern, float offset,
+		const float c[4])
+{
+	float alpha = c[3];
+
+	if (alpha == 0.0f) {
+		cairo_pattern_add_color_stop_rgba(pattern, offset, 0, 0, 0, 0);
+	} else {
+		cairo_pattern_add_color_stop_rgba(pattern, offset,
+			c[0] / alpha, c[1] / alpha, c[2] / alpha, alpha);
+	}
+}
+
+static cairo_pattern_t *
+create_titlebar_pattern(const struct theme_background *bg, int height)
+{
+	cairo_pattern_t *pattern;
+
+	switch (bg->gradient) {
+	case LAB_GRADIENT_VERTICAL:
+		pattern = cairo_pattern_create_linear(0, 0, 0, height);
+		add_color_stop_rgba_premult(pattern, 0, bg->color);
+		add_color_stop_rgba_premult(pattern, 1, bg->color_to);
+		break;
+
+	case LAB_GRADIENT_SPLITVERTICAL:
+		pattern = cairo_pattern_create_linear(0, 0, 0, height);
+		add_color_stop_rgba_premult(pattern, 0, bg->color_split_to);
+		add_color_stop_rgba_premult(pattern, 0.5, bg->color);
+		add_color_stop_rgba_premult(pattern, 0.5, bg->color_to);
+		add_color_stop_rgba_premult(pattern, 1, bg->color_to_split_to);
+		break;
+
+	case LAB_GRADIENT_NONE:
+	default:
+		pattern = color_to_pattern(bg->color);
+		break;
+	}
+
+	return pattern;
+}
+
+static struct lab_data_buffer *
+create_titlebar_fill(cairo_pattern_t *pattern, int height)
+{
+	/* create 1px wide buffer to be stretched horizontally */
+	struct lab_data_buffer *fill = buffer_create_cairo(1, height, 1);
+
+	cairo_t *cairo = cairo_create(fill->surface);
+	cairo_set_source(cairo, pattern);
+	cairo_paint(cairo);
+	cairo_surface_flush(fill->surface);
+	cairo_destroy(cairo);
+
+	return fill;
+}
+
+static void
+create_backgrounds(struct theme *theme)
+{
+	for (int active = THEME_INACTIVE; active <= THEME_ACTIVE; active++) {
+		theme->window[active].titlebar_pattern = create_titlebar_pattern(
+			&theme->window[active].title_bg,
+			theme->titlebar_height);
+		theme->window[active].titlebar_fill = create_titlebar_fill(
+			theme->window[active].titlebar_pattern,
+			theme->titlebar_height);
+	}
+}
+
+static void
 create_corners(struct theme *theme)
 {
 	int corner_width = ssd_get_corner_width();
@@ -1190,7 +1371,7 @@ create_corners(struct theme *theme)
 			.box = &box,
 			.radius = rc.corner_radius,
 			.line_width = theme->border_width,
-			.fill_color = theme->window[active].title_bg_color,
+			.fill_pattern = theme->window[active].titlebar_pattern,
 			.border_color = theme->window[active].border_color,
 			.corner = LAB_CORNER_TOP_LEFT,
 		};
@@ -1234,7 +1415,7 @@ shadow_edge_gradient(struct lab_data_buffer *buffer,
 		 */
 		double xn = (double)(x + inset) / (double)total_size;
 
-		/* Gausian dropoff */
+		/* Gaussian dropoff */
 		double alpha = exp(-(xn * xn) / variance);
 
 		/* RGBA values are all pre-multiplied */
@@ -1362,6 +1543,33 @@ create_shadows(struct theme *theme)
 }
 
 static void
+copy_color_scaled(float dest[4], const float src[4], float scale)
+{
+	/* RGB values are premultiplied so must not exceed alpha */
+	dest[0] = fminf(src[0] * scale, src[3]);
+	dest[1] = fminf(src[1] * scale, src[3]);
+	dest[2] = fminf(src[2] * scale, src[3]);
+	dest[3] = src[3]; /* alpha */
+}
+
+static void
+fill_background_colors(struct theme_background *bg)
+{
+	/* color.splitTo is color * 5/4, per Openbox theme spec */
+	if (bg->color_split_to[0] == FLT_MIN) {
+		copy_color_scaled(bg->color_split_to, bg->color, 1.25f);
+	}
+	/* colorTo has no default in Openbox; just re-use "color" */
+	if (bg->color_to[0] == FLT_MIN) {
+		memcpy(bg->color_to, bg->color, sizeof(bg->color_to));
+	}
+	/* colorTo.splitTo is colorTo * 17/16, per Openbox theme spec */
+	if (bg->color_to_split_to[0] == FLT_MIN) {
+		copy_color_scaled(bg->color_to_split_to, bg->color_to, 1.0625f);
+	}
+}
+
+static void
 fill_colors_with_osd_theme(struct theme *theme, float colors[3][4])
 {
 	memcpy(colors[0], theme->osd_bg_color, sizeof(colors[0]));
@@ -1386,18 +1594,31 @@ post_processing(struct theme *theme)
 {
 	theme->titlebar_height = get_titlebar_height(theme);
 
+	fill_background_colors(&theme->window[THEME_INACTIVE].title_bg);
+	fill_background_colors(&theme->window[THEME_ACTIVE].title_bg);
+
 	theme->menu_item_height = font_height(&rc.font_menuitem)
 		+ 2 * theme->menu_items_padding_y;
 
 	theme->menu_header_height = font_height(&rc.font_menuheader)
 		+ 2 * theme->menu_items_padding_y;
 
-	theme->osd_window_switcher_item_height = font_height(&rc.font_osd)
+	int osd_font_height = font_height(&rc.font_osd);
+	if (theme->osd_window_switcher_item_icon_size <= 0) {
+		theme->osd_window_switcher_item_icon_size = osd_font_height;
+	}
+	int osd_field_height =
+		MAX(osd_font_height, theme->osd_window_switcher_item_icon_size);
+	theme->osd_window_switcher_item_height = osd_field_height
 		+ 2 * theme->osd_window_switcher_item_padding_y
 		+ 2 * theme->osd_window_switcher_item_active_border_width;
 
 	if (rc.corner_radius >= theme->titlebar_height) {
 		rc.corner_radius = theme->titlebar_height - 1;
+	}
+
+	if (rc.resize_corner_range < 0) {
+		rc.resize_corner_range = theme->titlebar_height / 2;
 	}
 
 	int min_button_hover_radius =
@@ -1425,7 +1646,7 @@ post_processing(struct theme *theme)
 	/* Inherit OSD settings if not set */
 	if (theme->osd_bg_color[0] == FLT_MIN) {
 		memcpy(theme->osd_bg_color,
-			theme->window[THEME_ACTIVE].title_bg_color,
+			theme->window[THEME_ACTIVE].title_bg.color,
 			sizeof(theme->osd_bg_color));
 	}
 	if (theme->osd_border_width == INT_MIN) {
@@ -1496,11 +1717,18 @@ theme_init(struct theme *theme, struct server *server, const char *theme_name)
 	 */
 	theme_builtin(theme, server);
 
-	/* Read <data-dir>/share/themes/$theme_name/openbox-3/themerc */
 	struct wl_list paths;
-	paths_theme_create(&paths, theme_name, "themerc");
-	theme_read(theme, &paths);
-	paths_destroy(&paths);
+
+	if (theme_name) {
+		/*
+		 * Read
+		 *   - <data-dir>/share/themes/$theme_name/labwc/themerc
+		 *   - <data-dir>/share/themes/$theme_name/openbox-3/themerc
+		 */
+		paths_theme_create(&paths, theme_name, "themerc");
+		theme_read(theme, &paths);
+		paths_destroy(&paths);
+	}
 
 	/* Read <config-dir>/labwc/themerc-override */
 	paths_config_create(&paths, "themerc-override");
@@ -1508,6 +1736,7 @@ theme_init(struct theme *theme, struct server *server, const char *theme_name)
 	paths_destroy(&paths);
 
 	post_processing(theme);
+	create_backgrounds(theme);
 	create_corners(theme);
 	load_buttons(theme);
 	create_shadows(theme);
@@ -1524,8 +1753,8 @@ theme_finish(struct theme *theme)
 {
 	for (enum ssd_part_type type = LAB_SSD_BUTTON_FIRST;
 			type <= LAB_SSD_BUTTON_LAST; type++) {
-		for (uint8_t state_set = 0; state_set <= LAB_BS_ALL;
-				state_set++) {
+		for (uint8_t state_set = LAB_BS_DEFAULT;
+				state_set <= LAB_BS_ALL; state_set++) {
 			destroy_img(&theme->window[THEME_INACTIVE]
 				.button_imgs[type][state_set]);
 			destroy_img(&theme->window[THEME_ACTIVE]
@@ -1534,6 +1763,8 @@ theme_finish(struct theme *theme)
 	}
 
 	for (int active = THEME_INACTIVE; active <= THEME_ACTIVE; active++) {
+		zfree_pattern(theme->window[active].titlebar_pattern);
+		zdrop(&theme->window[active].titlebar_fill);
 		zdrop(&theme->window[active].corner_top_left_normal);
 		zdrop(&theme->window[active].corner_top_right_normal);
 		zdrop(&theme->window[active].shadow_corner_top);

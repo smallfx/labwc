@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <string.h>
 #include <strings.h>
-
 #include "common/mem.h"
 #include "common/list.h"
 #include "common/string-helpers.h"
@@ -20,10 +19,12 @@ libinput_category_init(struct libinput_category *l)
 	l->tap_button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
 	l->tap_and_drag = -1;
 	l->drag_lock = -1;
+	l->three_finger_drag = -1;
 	l->accel_profile = -1;
 	l->middle_emu = -1;
 	l->dwt = -1;
 	l->click_method = -1;
+	l->scroll_method = -1;
 	l->send_events_mode = -1;
 	l->have_calibration_matrix = false;
 	l->scroll_factor = 1.0;

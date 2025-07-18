@@ -25,6 +25,14 @@ window.active.indicator.toggled-keybind.color: #ff0000
 # window titlebar background
 window.active.title.bg.color: #e1dedb
 window.inactive.title.bg.color: #f6f5f4
+window.*.title.bg: Solid
+
+# Vertical and SplitVertical gradients are supported for window.*.title.bg
+# with the following additional color fields. See labwc-theme(5) for examples.
+#
+#     window.*.title.bg.colorTo:
+#     window.*.title.bg.color.splitTo:
+#     window.*.title.bg.colorTo.splitTo:
 
 # window titlebar text
 window.active.label.text.color: #000000
@@ -89,11 +97,14 @@ osd.window-switcher.padding: 4
 osd.window-switcher.item.padding.x: 10
 osd.window-switcher.item.padding.y: 1
 osd.window-switcher.item.active.border.width: 2
+# The icon size the same as the font size by default
+# osd.window-switcher.item.icon.size: 50
 osd.window-switcher.preview.border.width: 1
 osd.window-switcher.preview.border.color: #dddda6,#000000,#dddda6
 
 osd.workspace-switcher.boxes.width: 20
 osd.workspace-switcher.boxes.height: 20
+osd.workspace-switcher.boxes.border.width: 2
 
 # Default values for following options change depending on the rendering
 # backend. For software-based renderers, *.bg.enabled is "no" and

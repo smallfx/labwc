@@ -9,10 +9,13 @@ struct output;
 struct seat;
 
 struct lab_layer_surface {
+	struct wlr_layer_surface_v1 *layer_surface;
 	struct wlr_scene_layer_surface_v1 *scene_layer_surface;
 	struct server *server;
 
 	bool mapped;
+	/* true only inside handle_unmap() */
+	bool being_unmapped;
 
 	struct wl_listener map;
 	struct wl_listener unmap;
@@ -37,6 +40,7 @@ struct lab_layer_popup {
 };
 
 void layers_init(struct server *server);
+void layers_finish(struct server *server);
 
 void layers_arrange(struct output *output);
 void layer_try_set_focus(struct seat *seat,

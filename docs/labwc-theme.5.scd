@@ -9,6 +9,11 @@ labwc - theme files
 The theme engine aims to be compatible with openbox and themes will be
 searched for in the following order:
 
+- ${XDG_DATA_HOME:-$HOME/.local/share}/themes/<theme-name>/labwc/
+- $HOME/.themes/<theme-name>/labwc/
+- /usr/share/themes/<theme-name>/labwc/
+- /usr/local/share/themes/<theme-name>/labwc/
+- /opt/share/themes/<theme-name>/labwc/
 - ${XDG_DATA_HOME:-$HOME/.local/share}/themes/<theme-name>/openbox-3/
 - $HOME/.themes/<theme-name>/openbox-3/
 - /usr/share/themes/<theme-name>/openbox-3/
@@ -32,10 +37,22 @@ labwc-config(5).
 # DATA TYPES
 
 *color*
-	Colors can be specified by either of the following:
+	Colors can be specified by name or hexadecimal Red-Green-Blue (RGB)
+	value:
+
+	*color name* refers to "X11 color name", for example: 'white', 'grey40',
+	'pink' and 'peach puff'. More information can be found here:
+	- http://en.wikipedia.org/wiki/Web_colors#X11_color_names
+	- http://en.wikipedia.org/wiki/X11_color_names
+	- https://github.com/labwc/labwc/blob/master/src/common/rgb.txt
+
+	*RGB value*
+
 	- #rrggbb (hexadecimal RGB values)
 	- #rrggbb aaa (same but with decimal alpha value percentage)
 	- #rrggbbaa (same but with inline alpha value in hex encoding)
+	- #rgb (hexadecimal RGB values where #fff is shorthand for #f0f0f0)
+	  (since 0.9.0)
 
 	Note: the #rrggbb aaa notation is deprecated starting from
 	labwc 0.7.2 and may be removed in future releases.
@@ -43,6 +60,52 @@ labwc-config(5).
 *justification*
 	Justification determines the horizontal alignment of text.
 	Valid options are Left, Center and Right.
+
+*textures*
+	Textures determine the visual look of an element. They are specified
+	through a text string with a number of fields. Capitalization is not
+	significant. The format is as follows:
+
+```
+(Solid | Gradient <type>)
+```
+
+	... where *|* stands for "or".
+
+	- *Solid* means that the background of the texture is filled with a
+	  single color. The texture must be accompanied by a single color field.
+	  For example:
+
+```
+window.*.title.bg: Solid
+window.*.title.bg.color: #f8f5f2
+```
+
+	- *Gradient* means that the background of the texture is filled with a
+	  gradient from one color to another. When Gradient is specified, it
+	  must be followed by the gradient's type. It must also be accompanied
+	  by the fields *color* and *colorTo*. Valid gradient types are:
+	  (1) *Vertical* where the gradient goes from the top edge to the bottom
+	  (2) *SplitVertical* where the gradient is split in the middle and goes
+	  out toward the top and bottom edges. SplitVertical gradients have two
+	  extra, optional color fields: *color.splitTo* and *colorTo.splitTo*.
+	  These colors are the light colors used on the far top and bottom of
+	  the SplitVertical gradient. When these are omitted, the default values
+	  for these are *color x 5/4* and *colorTo x 17/16*. Examples:
+
+```
+# Vertical gradient
+window.*.title.bg: Gradient Vertical
+window.*.title.bg.color: #658fb5
+window.*.title.bg.colorTo: #4d6982
+
+# SplitVertical gradient
+window.*.title.bg: Gradient SplitVertical
+window.*.title.bg.color: #658fb5
+window.*.title.bg.color.splitTo: #7595b9
+window.*.title.bg.colorTo: #4d6982
+window.*.title.bg.colorTo.splitTo: #557485
+```
 
 # THEME ELEMENTS
 
@@ -70,12 +133,22 @@ labwc-config(5).
 	value as set for window.active.border.color to disable the status
 	indicator. Default is #ff0000.
 
+*window.active.title.bg*
+	Texture for the focused window's titlebar. See texture section above.
+	Default is *Solid*
+
 *window.active.title.bg.color*
-	Background color for the focused window's titlebar.
+	Background color for the focused window's titlebar. See texture section
+	for additional color fields associated with gradients.
 	Default is #e1dedb.
 
+*window.inactive.title.bg*
+	Texture for non-focused windows' titlebars. See texture section above.
+	Default is *Solid*
+
 *window.inactive.title.bg.color*
-	Background color for non-focused windows' titlebars.
+	Background color for non-focused windows' titlebars. See texture section
+	for additional color fields associated with gradients.
 	Default is #f6f5f4.
 
 *window.active.label.text.color*
@@ -86,7 +159,7 @@ labwc-config(5).
 
 *window.label.text.justify*
 	Specifies how window titles are aligned in the titlebar for both
-	focused and unfocused windows. Type justification. Default is Left.
+	focused and unfocused windows. Type justification. Default is Center.
 
 *window.button.width*
 	Width of a titlebar button, in pixels.
@@ -105,8 +178,8 @@ labwc-config(5).
 	Default is 0.
 
 	Note: for a circular hover effect, set *window.button.width* and
-	*window.button.height* equal and *window.button.hover.bg.corner-radius* half
-	of them.
+	*window.button.height* equal and *window.button.hover.bg.corner-radius*
+	half of them.
 
 *window.active.button.unpressed.image.color*
 	Color of the images in titlebar buttons in their default, unpressed,
@@ -251,6 +324,11 @@ all are supported.
 	Border width of the selection box in the window switcher in pixels.
 	Default is 2.
 
+*osd.window-switcher.item.icon.size*
+	Size of the icon in window switcher, in pixels.
+	If not set, the font size derived from <theme><font place="OnScreenDisplay">
+	is used.
+
 *osd.window-switcher.preview.border.width*
 	Border width of the outlines shown as the preview of the window selected
 	by window switcher. Inherits *osd.border.width* if not set.
@@ -270,6 +348,9 @@ all are supported.
 *osd.workspace-switcher.boxes.height*
 	Height of boxes in workspace switcher in pixels. Setting to 0 disables
 	boxes. Default is 20.
+
+*osd.workspace-switcher.boxes.border.width*
+	Border width of boxes in workspace switcher in pixels. Default is 2.
 
 *snapping.overlay.region.bg.enabled* [yes|no]
 	Show a filled rectangle as an overlay when a window is snapped to a

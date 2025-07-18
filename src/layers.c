@@ -12,6 +12,7 @@
 #include <string.h>
 #include <strings.h>
 #include <wayland-server.h>
+#include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/util/log.h>
 #include "common/macros.h"
@@ -46,6 +47,12 @@ arrange_one_layer(const struct wlr_box *full_area, struct wlr_box *usable_area,
 	wl_list_for_each(node, &tree->children, link) {
 		struct lab_layer_surface *surface = node_layer_surface_from_node(node);
 		struct wlr_scene_layer_surface_v1 *scene = surface->scene_layer_surface;
+		if (!scene->layer_surface->initialized) {
+			continue;
+		}
+		if (surface->being_unmapped) {
+			continue;
+		}
 		if (!!scene->layer_surface->current.exclusive_zone != exclusive) {
 			continue;
 		}
@@ -136,6 +143,9 @@ try_to_focus_next_layer_or_toplevel(struct server *server)
 {
 	struct seat *seat = &server->seat;
 	struct output *output = output_nearest_to_cursor(server);
+	if (!output) {
+		goto no_output;
+	}
 
 	enum zwlr_layer_shell_v1_layer overlay = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY;
 	enum zwlr_layer_shell_v1_layer top = ZWLR_LAYER_SHELL_V1_LAYER_TOP;
@@ -169,6 +179,7 @@ try_to_focus_next_layer_or_toplevel(struct server *server)
 	 * Unfocus the current layer-surface and focus the topmost toplevel if
 	 * one exists on the current workspace.
 	 */
+no_output:
 	if (seat->focused_layer) {
 		seat_set_focus_layer(seat, NULL);
 	}
@@ -298,6 +309,33 @@ handle_node_destroy(struct wl_listener *listener, void *data)
 {
 	struct lab_layer_surface *layer =
 		wl_container_of(listener, layer, node_destroy);
+
+	struct seat *seat = &layer->server->seat;
+
+	/*
+	 * If the surface of this node has the current keyboard focus, then we
+	 * have to deal with `seat->focused_layer` to avoid UAF bugs, for
+	 * example on TTY change. See issue #2863
+	 */
+	if (layer->layer_surface == seat->focused_layer) {
+		seat_set_focus_layer(seat, NULL);
+	}
+
+	/*
+	 * Important:
+	 *
+	 * We can no longer access layer->scene_layer_surface anymore
+	 * because it has already been free'd by wlroots.
+	 * Set it to NULL to run into a proper crash rather than accessing
+	 * random free'd memory.
+	 */
+	layer->scene_layer_surface = NULL;
+
+	struct wlr_xdg_popup *popup, *tmp;
+	wl_list_for_each_safe(popup, tmp, &layer->layer_surface->popups, link) {
+		wlr_xdg_popup_destroy(popup);
+	}
+
 	/*
 	 * TODO: Determine if this layer is being used by an exclusive client.
 	 * If it is, try and find another layer owned by this client to pass
@@ -319,6 +357,18 @@ handle_unmap(struct wl_listener *listener, void *data)
 	struct lab_layer_surface *layer = wl_container_of(listener, layer, unmap);
 	struct wlr_layer_surface_v1 *layer_surface =
 		layer->scene_layer_surface->layer_surface;
+
+	/*
+	 * If we send a configure event in unmap handler, the layer-shell
+	 * client sends ack_configure back and wlroots posts a
+	 * "wrong configure serial" error, which terminates the client (see
+	 * https://github.com/labwc/labwc/pull/1154#issuecomment-2906885183).
+	 *
+	 * To prevent this, we set being_unmapped here and check it in
+	 * arrange_one_layer() called by output_update_usable_area().
+	 */
+	layer->being_unmapped = true;
+
 	if (layer_surface->output) {
 		output_update_usable_area(layer_surface->output->data);
 	}
@@ -326,6 +376,8 @@ handle_unmap(struct wl_listener *listener, void *data)
 	if (seat->focused_layer == layer_surface) {
 		try_to_focus_next_layer_or_toplevel(layer->server);
 	}
+
+	layer->being_unmapped = false;
 }
 
 static void
@@ -350,10 +402,16 @@ handle_map(struct wl_listener *listener, void *data)
 }
 
 static void
-popup_handle_destroy(struct wl_listener *listener, void *data)
+handle_popup_destroy(struct wl_listener *listener, void *data)
 {
 	struct lab_layer_popup *popup =
 		wl_container_of(listener, popup, destroy);
+
+	struct wlr_xdg_popup *_popup, *tmp;
+	wl_list_for_each_safe(_popup, tmp, &popup->wlr_popup->base->popups, link) {
+		wlr_xdg_popup_destroy(_popup);
+	}
+
 	wl_list_remove(&popup->destroy.link);
 	wl_list_remove(&popup->new_popup.link);
 	wl_list_remove(&popup->reposition.link);
@@ -369,7 +427,7 @@ popup_handle_destroy(struct wl_listener *listener, void *data)
 }
 
 static void
-popup_handle_commit(struct wl_listener *listener, void *data)
+handle_popup_commit(struct wl_listener *listener, void *data)
 {
 	struct lab_layer_popup *popup =
 		wl_container_of(listener, popup, commit);
@@ -385,7 +443,7 @@ popup_handle_commit(struct wl_listener *listener, void *data)
 }
 
 static void
-popup_handle_reposition(struct wl_listener *listener, void *data)
+handle_popup_reposition(struct wl_listener *listener, void *data)
 {
 	struct lab_layer_popup *popup =
 		wl_container_of(listener, popup, reposition);
@@ -393,7 +451,7 @@ popup_handle_reposition(struct wl_listener *listener, void *data)
 		&popup->output_toplevel_sx_box);
 }
 
-static void popup_handle_new_popup(struct wl_listener *listener, void *data);
+static void handle_popup_new_popup(struct wl_listener *listener, void *data);
 
 static struct lab_layer_popup *
 create_popup(struct server *server, struct wlr_xdg_popup *wlr_popup,
@@ -415,16 +473,16 @@ create_popup(struct server *server, struct wlr_xdg_popup *wlr_popup,
 	node_descriptor_create(&popup->scene_tree->node,
 		LAB_NODE_DESC_LAYER_POPUP, popup);
 
-	popup->destroy.notify = popup_handle_destroy;
+	popup->destroy.notify = handle_popup_destroy;
 	wl_signal_add(&wlr_popup->events.destroy, &popup->destroy);
 
-	popup->new_popup.notify = popup_handle_new_popup;
+	popup->new_popup.notify = handle_popup_new_popup;
 	wl_signal_add(&wlr_popup->base->events.new_popup, &popup->new_popup);
 
-	popup->commit.notify = popup_handle_commit;
+	popup->commit.notify = handle_popup_commit;
 	wl_signal_add(&wlr_popup->base->surface->events.commit, &popup->commit);
 
-	popup->reposition.notify = popup_handle_reposition;
+	popup->reposition.notify = handle_popup_reposition;
 	wl_signal_add(&wlr_popup->events.reposition, &popup->reposition);
 
 	return popup;
@@ -432,7 +490,7 @@ create_popup(struct server *server, struct wlr_xdg_popup *wlr_popup,
 
 /* This popup's parent is a layer popup */
 static void
-popup_handle_new_popup(struct wl_listener *listener, void *data)
+handle_popup_new_popup(struct wl_listener *listener, void *data)
 {
 	struct lab_layer_popup *lab_layer_popup =
 		wl_container_of(listener, lab_layer_popup, new_popup);
@@ -542,8 +600,12 @@ handle_new_layer_surface(struct wl_listener *listener, void *data)
 	}
 
 	struct lab_layer_surface *surface = znew(*surface);
+	surface->layer_surface = layer_surface;
 
 	struct output *output = layer_surface->output->data;
+
+	wlr_fractional_scale_v1_notify_scale(layer_surface->surface,
+		output->wlr_output->scale);
 
 	struct wlr_scene_tree *selected_layer =
 		output->layer_tree[layer_surface->current.layer];
@@ -595,4 +657,10 @@ layers_init(struct server *server)
 	server->new_layer_surface.notify = handle_new_layer_surface;
 	wl_signal_add(&server->layer_shell->events.new_surface,
 		&server->new_layer_surface);
+}
+
+void
+layers_finish(struct server *server)
+{
+	wl_list_remove(&server->new_layer_surface.link);
 }

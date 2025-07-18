@@ -1,7 +1,7 @@
 project(
   'labwc',
   'c',
-  version: '0.8.2',
+  version: '0.9.0',
   license: 'GPL-2.0-only',
   meson_version: '>=0.59.0',
   default_options: [
@@ -34,6 +34,7 @@ add_project_arguments(cc.get_supported_arguments([
   '-Wmissing-prototypes',
   '-Walloca',
   '-Wunused-macros',
+  '-Wshadow',
 
   '-Wno-unused-parameter',
   '-Wno-expansion-to-defined',
@@ -50,18 +51,19 @@ endif
 add_project_arguments('-DLABWC_VERSION=@0@'.format(version), language: 'c')
 
 wlroots = dependency(
-  'wlroots-0.18',
+  'wlroots-0.19',
   default_options: ['default_library=static', 'examples=false'],
-  version: ['>=0.18.1', '<0.19.0'],
+  version: ['>=0.19.0', '<0.20.0'],
 )
 
 wlroots_has_xwayland = wlroots.get_variable('have_xwayland') == 'true'
 have_libsfdo = not get_option('icon').disabled()
 
 wayland_server = dependency('wayland-server', version: '>=1.19.0')
-wayland_protos = dependency('wayland-protocols', version: '>=1.35')
+wayland_protos = dependency('wayland-protocols', version: '>=1.39')
 xkbcommon = dependency('xkbcommon')
 xcb = dependency('xcb', required: get_option('xwayland'))
+xcb_ewmh = dependency('xcb-ewmh', required: get_option('xwayland'))
 xcb_icccm = dependency('xcb-icccm', required: get_option('xwayland'))
 drm_full = dependency('libdrm')
 drm = drm_full.partial_dependency(compile_args: true, includes: true)
@@ -93,10 +95,25 @@ sfdo_icon = dependency(
   required: have_libsfdo,
 )
 
+xwayland = dependency(
+  'xwayland',
+  version: '>=21.1.9',
+  required: get_option('xwayland'),
+)
+
 if get_option('xwayland').enabled() and not wlroots_has_xwayland
 	error('no wlroots Xwayland support')
 endif
-have_xwayland = xcb.found() and wlroots_has_xwayland
+if get_option('xwayland').disabled()
+	have_xwayland = false
+elif not xwayland.found()
+	warning('disabling xwayland, requires version >= 21.1.9')
+	have_xwayland = false
+elif xcb.found() and wlroots_has_xwayland
+	have_xwayland = true
+else
+	have_xwayland = false
+endif
 conf_data = configuration_data()
 conf_data.set10('HAVE_XWAYLAND', have_xwayland)
 
@@ -108,6 +125,10 @@ endif
 conf_data.set10('HAVE_RSVG', have_rsvg)
 
 conf_data.set10('HAVE_LIBSFDO', have_libsfdo)
+
+foreach sym : ['LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_STICKY', 'LIBINPUT_CONFIG_3FG_DRAG_ENABLED_3FG']
+	conf_data.set10('HAVE_' + sym, cc.has_header_symbol('libinput.h', sym, dependencies: input))
+endforeach
 
 if get_option('static_analyzer').enabled()
   add_project_arguments(['-fanalyzer'], language: 'c')
@@ -131,6 +152,7 @@ labwc_deps = [
   wayland_server,
   wlroots,
   xkbcommon,
+	xcb_ewmh,
   xcb_icccm,
   xml2,
   glib,
@@ -175,6 +197,10 @@ executable(
 install_data('data/labwc.desktop', install_dir: get_option('datadir') / 'wayland-sessions')
 
 install_data('data/labwc-portals.conf', install_dir: get_option('datadir') / 'xdg-desktop-portal')
+
+# TODO: move this to clients/meson.build after the labnag PR
+clients = files('clients/lab-sensible-terminal')
+install_data(clients, install_dir: get_option('bindir'))
 
 icons = ['labwc-symbolic.svg', 'labwc.svg']
 foreach icon : icons

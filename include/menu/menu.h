@@ -20,9 +20,8 @@ enum menuitem_type {
 
 struct menuitem {
 	struct wl_list actions;
-	char *execute;
-	char *id; /* needed for pipemenus */
 	char *text;
+	char *icon_name;
 	const char *arrow;
 	struct menu *parent;
 	struct menu *submenu;
@@ -32,7 +31,6 @@ struct menuitem {
 	struct wlr_scene_tree *tree;
 	struct wlr_scene_tree *normal_tree;
 	struct wlr_scene_tree *selected_tree;
-	struct menu_pipe_context *pipe_ctx;
 	struct view *client_list_view;  /* used by internal client-list */
 	struct wl_list link; /* menu.menuitems */
 };
@@ -41,6 +39,8 @@ struct menuitem {
 struct menu {
 	char *id;
 	char *label;
+	char *icon_name;
+	char *execute;
 	struct menu *parent;
 	struct menu_pipe_context *pipe_ctx;
 
@@ -55,8 +55,9 @@ struct menu {
 		struct menuitem *item;
 	} selection;
 	struct wlr_scene_tree *scene_tree;
-	bool is_pipemenu;
+	bool is_pipemenu_child;
 	bool align_left;
+	bool has_icons;
 
 	/* Used to match a window-menu to the view that triggered it. */
 	struct view *triggered_by_view;  /* may be NULL */
@@ -87,7 +88,7 @@ struct menu *menu_get_by_id(struct server *server, const char *id);
  * This function will close server->menu_current, open the
  * new menu and assign @menu to server->menu_current.
  *
- * Additionally, server->input_mode wil be set to LAB_INPUT_STATE_MENU.
+ * Additionally, server->input_mode will be set to LAB_INPUT_STATE_MENU.
  */
 void menu_open_root(struct menu *menu, int x, int y);
 
@@ -117,14 +118,11 @@ bool menu_call_actions(struct wlr_scene_node *node);
  * This function will close server->menu_current and set it to NULL.
  * Asserts that server->input_mode is set to LAB_INPUT_STATE_MENU.
  *
- * Additionally, server->input_mode wil be set to LAB_INPUT_STATE_PASSTHROUGH.
+ * Additionally, server->input_mode will be set to LAB_INPUT_STATE_PASSTHROUGH.
  */
 void menu_close_root(struct server *server);
 
 /* menu_reconfigure - reload theme and content */
 void menu_reconfigure(struct server *server);
-
-void update_client_list_combined_menu(struct server *server);
-void update_client_send_to_menu(struct server *server);
 
 #endif /* LABWC_MENU_H */

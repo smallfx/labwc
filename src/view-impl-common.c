@@ -2,28 +2,11 @@
 /* view-impl-common.c: common code for shell view->impl functions */
 #include <stdio.h>
 #include <strings.h>
-#include "common/list.h"
 #include "foreign-toplevel.h"
 #include "labwc.h"
 #include "view.h"
 #include "view-impl-common.h"
 #include "window-rules.h"
-
-void
-view_impl_move_to_front(struct view *view)
-{
-	wl_list_remove(&view->link);
-	wl_list_insert(&view->server->views, &view->link);
-	wlr_scene_node_raise_to_top(&view->scene_tree->node);
-}
-
-void
-view_impl_move_to_back(struct view *view)
-{
-	wl_list_remove(&view->link);
-	wl_list_append(&view->server->views, &view->link);
-	wlr_scene_node_lower_to_bottom(&view->scene_tree->node);
-}
 
 void
 view_impl_map(struct view *view)
@@ -52,7 +35,7 @@ view_impl_map(struct view *view)
 	 * Some clients (e.g. Steam's Big Picture Mode window) request
 	 * fullscreen before mapping.
 	 */
-	desktop_update_top_layer_visiblity(view->server);
+	desktop_update_top_layer_visibility(view->server);
 
 	wlr_log(WLR_DEBUG, "[map] identifier=%s, title=%s",
 		view_get_string_prop(view, "app_id"),
@@ -63,11 +46,16 @@ void
 view_impl_unmap(struct view *view)
 {
 	struct server *server = view->server;
-	if (view == server->active_view) {
+	/*
+	 * When exiting an xwayland application with multiple views
+	 * mapped, a race condition can occur: after the topmost view
+	 * is unmapped, the next view under it is offered focus, but is
+	 * also unmapped before accepting focus (so server->active_view
+	 * remains NULL). To avoid being left with no active view at
+	 * all, check for that case also.
+	 */
+	if (view == server->active_view || !server->active_view) {
 		desktop_focus_topmost_view(server);
-	}
-	if (view == server->last_raised_view) {
-		server->last_raised_view = NULL;
 	}
 }
 

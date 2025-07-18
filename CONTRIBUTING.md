@@ -92,8 +92,7 @@ to analyse keyboard events
 Some distributions carry labwc in their repositories or user repositories.
 
 - @ptrcnull (Alpine)
-- @narrat (Arch)
-- @artist-artix (Artix)
+- @ptr1337 (Arch)
 - @b1rger (Debian)
 - @jbeich (FreeBSD)
 - @epsilon-0 (Gentoo)
@@ -324,6 +323,32 @@ We use the prefix `handle_` for signal-handler-functions in order to be
 consistent with sway and rootston. For example
 `view->request_resize.notify = handle_request_resize`
 
+### Switch statements with variable declarations
+
+Unlike many modern languages, C doesn't create a new scope after `case FOO:`.
+Therefore, we wrap codes following `case FOO:` that include variable
+declarations with braces (`{..}`) to reduce variable scopes. For example:
+
+```
+switch (x) {
+case FOO: {
+	int y = 1;
+	break;
+}
+case BAR: {
+	do_something();
+	int z = 1;
+	break;
+}
+case BAZ:
+	do_something();
+	break;
+}
+```
+
+But please also consider refactoring the code into a separate function if it
+becomes lengthy.
+
 # Commit Messages
 
 The log messages that explain changes are just as important as the changes
@@ -358,7 +383,7 @@ tests do not contribute a great deal. However, they have a role to play in
 providing some verification that stand-alone functions behave as expected.
 
 On this project, writing unit-tests is not compulsory nor do we measure
-coverage. The inclusion of the t/ directory does not signifiy a move towards
+coverage. The inclusion of the t/ directory does not signify a move towards
 test-driven development. We intend to use unit tests sparingly and only when
 devs find them useful.
 

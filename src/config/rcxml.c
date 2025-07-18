@@ -14,7 +14,6 @@
 #include <wayland-server-core.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
-#include <wlr/version.h>
 #include "action.h"
 #include "common/dir.h"
 #include "common/list.h"
@@ -38,37 +37,36 @@
 #include "window-rules.h"
 #include "workspaces.h"
 
-#define LAB_WLR_VERSION_OLDER_THAN(major, minor, micro) \
-	(WLR_VERSION_NUM < (((major) << 16) | ((minor) << 8) | (micro)))
+struct parser_state {
+	bool in_regions;
+	bool in_usable_area_override;
+	bool in_keybind;
+	bool in_mousebind;
+	bool in_touch;
+	bool in_libinput_category;
+	bool in_window_switcher_field;
+	bool in_window_rules;
+	bool in_action_query;
+	bool in_action_then_branch;
+	bool in_action_else_branch;
+	bool in_action_none_branch;
+	struct usable_area_override *current_usable_area_override;
+	struct keybind *current_keybind;
+	struct mousebind *current_mousebind;
+	struct touch_config_entry *current_touch;
+	struct libinput_category *current_libinput_category;
+	const char *current_mouse_context;
+	struct action *current_keybind_action;
+	struct action *current_mousebind_action;
+	struct region *current_region;
+	struct window_switcher_field *current_field;
+	struct window_rule *current_window_rule;
+	struct action *current_window_rule_action;
+	struct view_query *current_view_query;
+	struct action *current_child_action;
+};
 
-static bool in_regions;
-static bool in_usable_area_override;
-static bool in_keybind;
-static bool in_mousebind;
-static bool in_touch;
-static bool in_libinput_category;
-static bool in_window_switcher_field;
-static bool in_window_rules;
-static bool in_action_query;
-static bool in_action_then_branch;
-static bool in_action_else_branch;
-static bool in_action_none_branch;
-
-static struct usable_area_override *current_usable_area_override;
-static struct keybind *current_keybind;
-static struct mousebind *current_mousebind;
-static struct touch_config_entry *current_touch;
-static struct libinput_category *current_libinput_category;
-static const char *current_mouse_context;
-static struct action *current_keybind_action;
-static struct action *current_mousebind_action;
-static struct region *current_region;
-static struct window_switcher_field *current_field;
-static struct window_rule *current_window_rule;
-static struct action *current_window_rule_action;
-static struct view_query *current_view_query;
-static struct action *current_child_action;
-/* for backword compatibility of <mouse><scrollFactor> */
+/* for backward compatibility of <mouse><scrollFactor> */
 static double mouse_scroll_factor = -1;
 
 enum font_place {
@@ -147,7 +145,7 @@ parse_window_type(const char *type)
  * desk         D           All-desktops toggle (aka omnipresent)
  */
 static void
-fill_section(const char *content, struct wl_list *list)
+fill_section(const char *content, struct wl_list *list, uint32_t *found_buttons)
 {
 	gchar **identifiers = g_strsplit(content, ",", -1);
 	for (size_t i = 0; identifiers[i]; ++i) {
@@ -157,7 +155,13 @@ fill_section(const char *content, struct wl_list *list)
 		}
 		enum ssd_part_type type = LAB_SSD_NONE;
 		if (!strcmp(identifier, "icon")) {
+#if HAVE_LIBSFDO
 			type = LAB_SSD_BUTTON_WINDOW_ICON;
+#else
+			wlr_log(WLR_ERROR, "libsfdo is not linked. "
+				"Replacing 'icon' in titlebar layout with 'menu'.");
+			type = LAB_SSD_BUTTON_WINDOW_MENU;
+#endif
 		} else if (!strcmp(identifier, "menu")) {
 			type = LAB_SSD_BUTTON_WINDOW_MENU;
 		} else if (!strcmp(identifier, "iconify")) {
@@ -178,6 +182,14 @@ fill_section(const char *content, struct wl_list *list)
 
 		assert(type != LAB_SSD_NONE);
 
+		if (*found_buttons & (1 << type)) {
+			wlr_log(WLR_ERROR, "ignoring duplicated button type '%s'",
+				identifier);
+			continue;
+		}
+
+		*found_buttons |= (1 << type);
+
 		struct title_button *item = znew(*item);
 		item->type = type;
 		wl_list_append(list, &item->link);
@@ -185,60 +197,25 @@ fill_section(const char *content, struct wl_list *list)
 	g_strfreev(identifiers);
 }
 
-static int
-compare_strings(const void *a, const void *b)
+static void
+clear_title_layout(void)
 {
-	char * const *str1 = a;
-	char * const *str2 = b;
-	return strcmp(*str1, *str2);
-}
-
-static bool
-contains_duplicates(char *content)
-{
-	bool ret = false;
-
-	/*
-	 * The string typically looks like: 'menu:iconfiy,max,close' so we have
-	 * to split on both ':' and ','.
-	 */
-	gchar **idents = g_strsplit_set(content, ",:", -1);
-
-	/*
-	 * We've got to have at least two for duplicates to exist. Bailing out
-	 * early here also enables the below algorithm which just iterates and
-	 * checks if previous item is the same.
-	 */
-	if (g_strv_length(idents) <= 1) {
-		goto out;
+	struct title_button *button, *button_tmp;
+	wl_list_for_each_safe(button, button_tmp, &rc.title_buttons_left, link) {
+		wl_list_remove(&button->link);
+		zfree(button);
 	}
-
-	qsort(idents, g_strv_length(idents), sizeof(gchar *), compare_strings);
-	for (size_t i = 1; idents[i]; ++i) {
-		if (string_null_or_empty(idents[i])) {
-			continue;
-		}
-		if (!strcmp(idents[i], idents[i-1])) {
-			ret = true;
-			wlr_log(WLR_ERROR,
-				"titleLayout identifier '%s' is a duplicate",
-				idents[i]);
-			break;
-		}
+	wl_list_for_each_safe(button, button_tmp, &rc.title_buttons_right, link) {
+		wl_list_remove(&button->link);
+		zfree(button);
 	}
-
-out:
-	g_strfreev(idents);
-	return ret;
+	rc.title_layout_loaded = false;
 }
 
 static void
 fill_title_layout(char *content)
 {
-	if (contains_duplicates(content)) {
-		wlr_log(WLR_ERROR, "titleLayout contains duplicates");
-		return;
-	}
+	clear_title_layout();
 
 	struct wl_list *sections[] = {
 		&rc.title_buttons_left,
@@ -252,8 +229,9 @@ fill_title_layout(char *content)
 		goto err;
 	}
 
+	uint32_t found_buttons = 0;
 	for (size_t i = 0; parts[i]; ++i) {
-		fill_section(parts[i], sections[i]);
+		fill_section(parts[i], sections[i], &found_buttons);
 	}
 
 	rc.title_layout_loaded = true;
@@ -262,28 +240,29 @@ err:
 }
 
 static void
-fill_usable_area_override(char *nodename, char *content)
+fill_usable_area_override(char *nodename, char *content, struct parser_state *state)
 {
 	if (!strcasecmp(nodename, "margin")) {
-		current_usable_area_override = znew(*current_usable_area_override);
-		wl_list_append(&rc.usable_area_overrides, &current_usable_area_override->link);
+		state->current_usable_area_override = znew(*state->current_usable_area_override);
+		wl_list_append(&rc.usable_area_overrides,
+				&state->current_usable_area_override->link);
 		return;
 	}
 	string_truncate_at_pattern(nodename, ".margin");
 	if (!content) {
 		/* nop */
-	} else if (!current_usable_area_override) {
+	} else if (!state->current_usable_area_override) {
 		wlr_log(WLR_ERROR, "no usable-area-override object");
 	} else if (!strcmp(nodename, "output")) {
-		xstrdup_replace(current_usable_area_override->output, content);
+		xstrdup_replace(state->current_usable_area_override->output, content);
 	} else if (!strcmp(nodename, "left")) {
-		current_usable_area_override->margin.left = atoi(content);
+		state->current_usable_area_override->margin.left = atoi(content);
 	} else if (!strcmp(nodename, "right")) {
-		current_usable_area_override->margin.right = atoi(content);
+		state->current_usable_area_override->margin.right = atoi(content);
 	} else if (!strcmp(nodename, "top")) {
-		current_usable_area_override->margin.top = atoi(content);
+		state->current_usable_area_override->margin.top = atoi(content);
 	} else if (!strcmp(nodename, "bottom")) {
-		current_usable_area_override->margin.bottom = atoi(content);
+		state->current_usable_area_override->margin.bottom = atoi(content);
 	} else {
 		wlr_log(WLR_ERROR, "Unexpected data usable-area-override parser: %s=\"%s\"",
 			nodename, content);
@@ -306,35 +285,35 @@ set_property(const char *str, enum property *variable)
 }
 
 static void
-fill_window_rule(char *nodename, char *content)
+fill_window_rule(char *nodename, char *content, struct parser_state *state)
 {
 	if (!strcasecmp(nodename, "windowRule.windowRules")) {
-		current_window_rule = znew(*current_window_rule);
-		current_window_rule->window_type = -1; // Window types are >= 0
-		wl_list_append(&rc.window_rules, &current_window_rule->link);
-		wl_list_init(&current_window_rule->actions);
+		state->current_window_rule = znew(*state->current_window_rule);
+		state->current_window_rule->window_type = -1; // Window types are >= 0
+		wl_list_append(&rc.window_rules, &state->current_window_rule->link);
+		wl_list_init(&state->current_window_rule->actions);
 		return;
 	}
 
 	string_truncate_at_pattern(nodename, ".windowrule.windowrules");
 	if (!content) {
 		/* nop */
-	} else if (!current_window_rule) {
+	} else if (!state->current_window_rule) {
 		wlr_log(WLR_ERROR, "no window-rule");
 
 	/* Criteria */
 	} else if (!strcmp(nodename, "identifier")) {
-		xstrdup_replace(current_window_rule->identifier, content);
+		xstrdup_replace(state->current_window_rule->identifier, content);
 	} else if (!strcmp(nodename, "title")) {
-		xstrdup_replace(current_window_rule->title, content);
+		xstrdup_replace(state->current_window_rule->title, content);
 	} else if (!strcmp(nodename, "type")) {
-		current_window_rule->window_type = parse_window_type(content);
+		state->current_window_rule->window_type = parse_window_type(content);
 	} else if (!strcasecmp(nodename, "matchOnce")) {
-		set_bool(content, &current_window_rule->match_once);
+		set_bool(content, &state->current_window_rule->match_once);
 	} else if (!strcasecmp(nodename, "sandboxEngine")) {
-		xstrdup_replace(current_window_rule->sandbox_engine, content);
+		xstrdup_replace(state->current_window_rule->sandbox_engine, content);
 	} else if (!strcasecmp(nodename, "sandboxAppId")) {
-		xstrdup_replace(current_window_rule->sandbox_app_id, content);
+		xstrdup_replace(state->current_window_rule->sandbox_app_id, content);
 
 	/* Event */
 	} else if (!strcmp(nodename, "event")) {
@@ -343,89 +322,108 @@ fill_window_rule(char *nodename, char *content)
 		 * events in the future. We default to onFirstMap anyway.
 		 */
 		if (!strcasecmp(content, "onFirstMap")) {
-			current_window_rule->event = LAB_WINDOW_RULE_EVENT_ON_FIRST_MAP;
+			state->current_window_rule->event = LAB_WINDOW_RULE_EVENT_ON_FIRST_MAP;
 		}
 
 	/* Properties */
 	} else if (!strcasecmp(nodename, "serverDecoration")) {
-		set_property(content, &current_window_rule->server_decoration);
+		set_property(content, &state->current_window_rule->server_decoration);
+	} else if (!strcasecmp(nodename, "iconPriority")) {
+		if (!strcasecmp(content, "client")) {
+			state->current_window_rule->icon_prefer_client = LAB_PROP_TRUE;
+		} else if (!strcasecmp(content, "server")) {
+			state->current_window_rule->icon_prefer_client = LAB_PROP_FALSE;
+		} else {
+			wlr_log(WLR_ERROR,
+				"Invalid value for window rule property 'iconPriority'");
+		}
 	} else if (!strcasecmp(nodename, "skipTaskbar")) {
-		set_property(content, &current_window_rule->skip_taskbar);
+		set_property(content, &state->current_window_rule->skip_taskbar);
 	} else if (!strcasecmp(nodename, "skipWindowSwitcher")) {
-		set_property(content, &current_window_rule->skip_window_switcher);
+		set_property(content, &state->current_window_rule->skip_window_switcher);
 	} else if (!strcasecmp(nodename, "ignoreFocusRequest")) {
-		set_property(content, &current_window_rule->ignore_focus_request);
+		set_property(content, &state->current_window_rule->ignore_focus_request);
 	} else if (!strcasecmp(nodename, "ignoreConfigureRequest")) {
-		set_property(content, &current_window_rule->ignore_configure_request);
+		set_property(content, &state->current_window_rule->ignore_configure_request);
 	} else if (!strcasecmp(nodename, "fixedPosition")) {
-		set_property(content, &current_window_rule->fixed_position);
+		set_property(content, &state->current_window_rule->fixed_position);
 
 	/* Actions */
 	} else if (!strcmp(nodename, "name.action")) {
-		current_window_rule_action = action_create(content);
-		if (current_window_rule_action) {
-			wl_list_append(&current_window_rule->actions,
-				&current_window_rule_action->link);
+		state->current_window_rule_action = action_create(content);
+		if (state->current_window_rule_action) {
+			wl_list_append(&state->current_window_rule->actions,
+				&state->current_window_rule_action->link);
 		}
-	} else if (!current_window_rule_action) {
+	} else if (!state->current_window_rule_action) {
 		wlr_log(WLR_ERROR, "expect <action name=\"\"> element first. "
 			"nodename: '%s' content: '%s'", nodename, content);
 	} else {
-		action_arg_from_xml_node(current_window_rule_action, nodename, content);
+		action_arg_from_xml_node(state->current_window_rule_action, nodename, content);
 	}
 }
 
 static void
-fill_window_switcher_field(char *nodename, char *content)
+clear_window_switcher_fields(void)
+{
+	struct window_switcher_field *field, *field_tmp;
+	wl_list_for_each_safe(field, field_tmp, &rc.window_switcher.fields, link) {
+		wl_list_remove(&field->link);
+		osd_field_free(field);
+	}
+}
+
+static void
+fill_window_switcher_field(char *nodename, char *content, struct parser_state *state)
 {
 	if (!strcasecmp(nodename, "field.fields.windowswitcher")) {
-		current_field = osd_field_create();
-		wl_list_append(&rc.window_switcher.fields, &current_field->link);
+		state->current_field = osd_field_create();
+		wl_list_append(&rc.window_switcher.fields, &state->current_field->link);
 		return;
 	}
 
 	string_truncate_at_pattern(nodename, ".field.fields.windowswitcher");
 	if (!content) {
 		/* intentionally left empty */
-	} else if (!current_field) {
+	} else if (!state->current_field) {
 		wlr_log(WLR_ERROR, "no <field>");
 	} else {
-		osd_field_arg_from_xml_node(current_field, nodename, content);
+		osd_field_arg_from_xml_node(state->current_field, nodename, content);
 	}
 }
 
 static void
-fill_region(char *nodename, char *content)
+fill_region(char *nodename, char *content, struct parser_state *state)
 {
 	string_truncate_at_pattern(nodename, ".region.regions");
 
 	if (!strcasecmp(nodename, "region.regions")) {
-		current_region = znew(*current_region);
-		wl_list_append(&rc.regions, &current_region->link);
+		state->current_region = znew(*state->current_region);
+		wl_list_append(&rc.regions, &state->current_region->link);
 	} else if (!content) {
 		/* intentionally left empty */
-	} else if (!current_region) {
+	} else if (!state->current_region) {
 		wlr_log(WLR_ERROR, "Expecting <region name=\"\" before %s='%s'",
 			nodename, content);
 	} else if (!strcasecmp(nodename, "name")) {
 		/* Prevent leaking memory if config contains multiple names */
-		if (!current_region->name) {
-			current_region->name = xstrdup(content);
+		if (!state->current_region->name) {
+			state->current_region->name = xstrdup(content);
 		}
 	} else if (strstr("xywidtheight", nodename) && !strchr(content, '%')) {
 		wlr_log(WLR_ERROR, "Removing invalid region '%s': %s='%s' misses"
-			" a trailing %%", current_region->name, nodename, content);
-		wl_list_remove(&current_region->link);
-		zfree(current_region->name);
-		zfree(current_region);
+			" a trailing %%", state->current_region->name, nodename, content);
+		wl_list_remove(&state->current_region->link);
+		zfree(state->current_region->name);
+		zfree(state->current_region);
 	} else if (!strcmp(nodename, "x")) {
-		current_region->percentage.x = atoi(content);
+		state->current_region->percentage.x = atoi(content);
 	} else if (!strcmp(nodename, "y")) {
-		current_region->percentage.y = atoi(content);
+		state->current_region->percentage.y = atoi(content);
 	} else if (!strcmp(nodename, "width")) {
-		current_region->percentage.width = atoi(content);
+		state->current_region->percentage.width = atoi(content);
 	} else if (!strcmp(nodename, "height")) {
-		current_region->percentage.height = atoi(content);
+		state->current_region->percentage.height = atoi(content);
 	} else {
 		wlr_log(WLR_ERROR, "Unexpected data in region parser: %s=\"%s\"",
 			nodename, content);
@@ -433,7 +431,7 @@ fill_region(char *nodename, char *content)
 }
 
 static void
-fill_action_query(char *nodename, char *content, struct action *action)
+fill_action_query(char *nodename, char *content, struct action *action, struct parser_state *state)
 {
 	if (!action) {
 		wlr_log(WLR_ERROR, "No parent action for query: %s=%s", nodename, content);
@@ -444,7 +442,7 @@ fill_action_query(char *nodename, char *content, struct action *action)
 	string_truncate_at_pattern(nodename, ".mousebind.context.mouse");
 
 	if (!strcasecmp(nodename, "query.action")) {
-		current_view_query = NULL;
+		state->current_view_query = NULL;
 	}
 
 	string_truncate_at_pattern(nodename, ".query.action");
@@ -453,52 +451,52 @@ fill_action_query(char *nodename, char *content, struct action *action)
 		return;
 	}
 
-	if (!current_view_query) {
+	if (!state->current_view_query) {
 		struct wl_list *queries = action_get_querylist(action, "query");
 		if (!queries) {
 			action_arg_add_querylist(action, "query");
 			queries = action_get_querylist(action, "query");
 		}
-		current_view_query = view_query_create();
-		wl_list_append(queries, &current_view_query->link);
+		state->current_view_query = view_query_create();
+		wl_list_append(queries, &state->current_view_query->link);
 	}
 
 	if (!strcasecmp(nodename, "identifier")) {
-		xstrdup_replace(current_view_query->identifier, content);
+		xstrdup_replace(state->current_view_query->identifier, content);
 	} else if (!strcasecmp(nodename, "title")) {
-		xstrdup_replace(current_view_query->title, content);
+		xstrdup_replace(state->current_view_query->title, content);
 	} else if (!strcmp(nodename, "type")) {
-		current_view_query->window_type = parse_window_type(content);
+		state->current_view_query->window_type = parse_window_type(content);
 	} else if (!strcasecmp(nodename, "sandboxEngine")) {
-		xstrdup_replace(current_view_query->sandbox_engine, content);
+		xstrdup_replace(state->current_view_query->sandbox_engine, content);
 	} else if (!strcasecmp(nodename, "sandboxAppId")) {
-		xstrdup_replace(current_view_query->sandbox_app_id, content);
+		xstrdup_replace(state->current_view_query->sandbox_app_id, content);
 	} else if (!strcasecmp(nodename, "shaded")) {
-		current_view_query->shaded = parse_three_state(content);
+		state->current_view_query->shaded = parse_three_state(content);
 	} else if (!strcasecmp(nodename, "maximized")) {
-		current_view_query->maximized = view_axis_parse(content);
+		state->current_view_query->maximized = view_axis_parse(content);
 	} else if (!strcasecmp(nodename, "iconified")) {
-		current_view_query->iconified = parse_three_state(content);
+		state->current_view_query->iconified = parse_three_state(content);
 	} else if (!strcasecmp(nodename, "focused")) {
-		current_view_query->focused = parse_three_state(content);
+		state->current_view_query->focused = parse_three_state(content);
 	} else if (!strcasecmp(nodename, "omnipresent")) {
-		current_view_query->omnipresent = parse_three_state(content);
+		state->current_view_query->omnipresent = parse_three_state(content);
 	} else if (!strcasecmp(nodename, "tiled")) {
-		current_view_query->tiled = view_edge_parse(content);
+		state->current_view_query->tiled = view_edge_parse(content);
 	} else if (!strcasecmp(nodename, "tiled_region")) {
-		xstrdup_replace(current_view_query->tiled_region, content);
+		xstrdup_replace(state->current_view_query->tiled_region, content);
 	} else if (!strcasecmp(nodename, "desktop")) {
-		xstrdup_replace(current_view_query->desktop, content);
+		xstrdup_replace(state->current_view_query->desktop, content);
 	} else if (!strcasecmp(nodename, "decoration")) {
-		current_view_query->decoration = ssd_mode_parse(content);
+		state->current_view_query->decoration = ssd_mode_parse(content);
 	} else if (!strcasecmp(nodename, "monitor")) {
-		xstrdup_replace(current_view_query->monitor, content);
+		xstrdup_replace(state->current_view_query->monitor, content);
 	}
 }
 
 static void
 fill_child_action(char *nodename, char *content, struct action *parent,
-	const char *branch_name)
+	const char *branch_name, struct parser_state *state)
 {
 	if (!parent) {
 		wlr_log(WLR_ERROR, "No parent action for branch: %s=%s", nodename, content);
@@ -512,7 +510,7 @@ fill_child_action(char *nodename, char *content, struct action *parent,
 	string_truncate_at_pattern(nodename, ".none.action");
 
 	if (!strcasecmp(nodename, "action")) {
-		current_child_action = NULL;
+		state->current_child_action = NULL;
 	}
 
 	if (!content) {
@@ -530,52 +528,52 @@ fill_child_action(char *nodename, char *content, struct action *parent,
 			wlr_log(WLR_ERROR, "action '%s' cannot be a child action", content);
 			return;
 		}
-		current_child_action = action_create(content);
-		if (current_child_action) {
-			wl_list_append(siblings, &current_child_action->link);
+		state->current_child_action = action_create(content);
+		if (state->current_child_action) {
+			wl_list_append(siblings, &state->current_child_action->link);
 		}
-	} else if (!current_child_action) {
+	} else if (!state->current_child_action) {
 		wlr_log(WLR_ERROR, "expect <action name=\"\"> element first. "
 			"nodename: '%s' content: '%s'", nodename, content);
 	} else {
-		action_arg_from_xml_node(current_child_action, nodename, content);
+		action_arg_from_xml_node(state->current_child_action, nodename, content);
 	}
 }
 
 static void
-fill_keybind(char *nodename, char *content)
+fill_keybind(char *nodename, char *content, struct parser_state *state)
 {
 	if (!content) {
 		return;
 	}
 	string_truncate_at_pattern(nodename, ".keybind.keyboard");
 	if (!strcmp(nodename, "key")) {
-		current_keybind = keybind_create(content);
-		current_keybind_action = NULL;
+		state->current_keybind = keybind_create(content);
+		state->current_keybind_action = NULL;
 		/*
 		 * If an invalid keybind has been provided,
 		 * keybind_create() complains.
 		 */
-		if (!current_keybind) {
+		if (!state->current_keybind) {
 			wlr_log(WLR_ERROR, "Invalid keybind: %s", content);
 			return;
 		}
-	} else if (!current_keybind) {
+	} else if (!state->current_keybind) {
 		wlr_log(WLR_ERROR, "expect <keybind key=\"\"> element first. "
 			"nodename: '%s' content: '%s'", nodename, content);
 	} else if (!strcasecmp(nodename, "onRelease")) {
-		set_bool(content, &current_keybind->on_release);
+		set_bool(content, &state->current_keybind->on_release);
 	} else if (!strcasecmp(nodename, "layoutDependent")) {
-		set_bool(content, &current_keybind->use_syms_only);
+		set_bool(content, &state->current_keybind->use_syms_only);
 	} else if (!strcasecmp(nodename, "allowWhenLocked")) {
-		set_bool(content, &current_keybind->allow_when_locked);
+		set_bool(content, &state->current_keybind->allow_when_locked);
 	} else if (!strcmp(nodename, "name.action")) {
-		current_keybind_action = action_create(content);
-		if (current_keybind_action) {
-			wl_list_append(&current_keybind->actions,
-				&current_keybind_action->link);
+		state->current_keybind_action = action_create(content);
+		if (state->current_keybind_action) {
+			wl_list_append(&state->current_keybind->actions,
+				&state->current_keybind_action->link);
 		}
-	} else if (!current_keybind_action) {
+	} else if (!state->current_keybind_action) {
 		wlr_log(WLR_ERROR, "expect <action name=\"\"> element first. "
 			"nodename: '%s' content: '%s'", nodename, content);
 	} else {
@@ -584,12 +582,12 @@ fill_keybind(char *nodename, char *content)
 		 * <region>, <direction> and so on. This is common to key- and
 		 * mousebinds.
 		 */
-		action_arg_from_xml_node(current_keybind_action, nodename, content);
+		action_arg_from_xml_node(state->current_keybind_action, nodename, content);
 	}
 }
 
 static void
-fill_mousebind(char *nodename, char *content)
+fill_mousebind(char *nodename, char *content, struct parser_state *state)
 {
 	/*
 	 * Example of what we are parsing:
@@ -600,55 +598,55 @@ fill_mousebind(char *nodename, char *content)
 	 * </mousebind>
 	 */
 
-	if (!current_mouse_context) {
+	if (!state->current_mouse_context) {
 		wlr_log(WLR_ERROR, "expect <context name=\"\"> element first. "
 			"nodename: '%s' content: '%s'", nodename, content);
 		return;
 	} else if (!strcmp(nodename, "mousebind.context.mouse")) {
 		wlr_log(WLR_INFO, "create mousebind for %s",
-			current_mouse_context);
-		current_mousebind = mousebind_create(current_mouse_context);
-		current_mousebind_action = NULL;
+			state->current_mouse_context);
+		state->current_mousebind = mousebind_create(state->current_mouse_context);
+		state->current_mousebind_action = NULL;
 		return;
 	} else if (!content) {
 		return;
 	}
 
 	string_truncate_at_pattern(nodename, ".mousebind.context.mouse");
-	if (!current_mousebind) {
+	if (!state->current_mousebind) {
 		wlr_log(WLR_ERROR,
 			"expect <mousebind button=\"\" action=\"\"> element first. "
 			"nodename: '%s' content: '%s'", nodename, content);
 	} else if (!strcmp(nodename, "button")) {
-		current_mousebind->button = mousebind_button_from_str(content,
-			&current_mousebind->modifiers);
+		state->current_mousebind->button = mousebind_button_from_str(content,
+			&state->current_mousebind->modifiers);
 	} else if (!strcmp(nodename, "direction")) {
-		current_mousebind->direction = mousebind_direction_from_str(content,
-			&current_mousebind->modifiers);
+		state->current_mousebind->direction = mousebind_direction_from_str(content,
+			&state->current_mousebind->modifiers);
 	} else if (!strcmp(nodename, "action")) {
 		/* <mousebind button="" action="EVENT"> */
-		current_mousebind->mouse_event =
+		state->current_mousebind->mouse_event =
 			mousebind_event_from_str(content);
 	} else if (!strcmp(nodename, "name.action")) {
-		current_mousebind_action = action_create(content);
-		if (current_mousebind_action) {
-			wl_list_append(&current_mousebind->actions,
-				&current_mousebind_action->link);
+		state->current_mousebind_action = action_create(content);
+		if (state->current_mousebind_action) {
+			wl_list_append(&state->current_mousebind->actions,
+				&state->current_mousebind_action->link);
 		}
-	} else if (!current_mousebind_action) {
+	} else if (!state->current_mousebind_action) {
 		wlr_log(WLR_ERROR, "expect <action name=\"\"> element first. "
 			"nodename: '%s' content: '%s'", nodename, content);
 	} else {
-		action_arg_from_xml_node(current_mousebind_action, nodename, content);
+		action_arg_from_xml_node(state->current_mousebind_action, nodename, content);
 	}
 }
 
 static void
-fill_touch(char *nodename, char *content)
+fill_touch(char *nodename, char *content, struct parser_state *state)
 {
 	if (!strcasecmp(nodename, "touch")) {
-		current_touch = znew(*current_touch);
-		wl_list_append(&rc.touch_configs, &current_touch->link);
+		state->current_touch = znew(*state->current_touch);
+		wl_list_append(&rc.touch_configs, &state->current_touch->link);
 		return;
 	}
 
@@ -657,11 +655,11 @@ fill_touch(char *nodename, char *content)
 	}
 
 	if (!strcasecmp(nodename, "deviceName.touch")) {
-		xstrdup_replace(current_touch->device_name, content);
+		xstrdup_replace(state->current_touch->device_name, content);
 	} else if (!strcasecmp(nodename, "mapToOutput.touch")) {
-		xstrdup_replace(current_touch->output_name, content);
+		xstrdup_replace(state->current_touch->output_name, content);
 	} else if (!strcasecmp(nodename, "mouseEmulation.touch")) {
-		set_bool(content, &current_touch->force_mouse_emulation);
+		set_bool(content, &state->current_touch->force_mouse_emulation);
 	} else {
 		wlr_log(WLR_ERROR, "Unexpected data in touch parser: %s=\"%s\"",
 			nodename, content);
@@ -707,7 +705,7 @@ err:
 }
 
 static void
-fill_libinput_category(char *nodename, char *content)
+fill_libinput_category(char *nodename, char *content, struct parser_state *state)
 {
 	/*
 	 * Create a new profile (libinput-category) on `<libinput><device>`
@@ -715,14 +713,14 @@ fill_libinput_category(char *nodename, char *content)
 	 * category="" attribute (same as <device category="default">...)
 	 */
 	if (!strcmp(nodename, "device.libinput")) {
-		current_libinput_category = libinput_category_create();
+		state->current_libinput_category = libinput_category_create();
 	}
 
 	if (!content) {
 		return;
 	}
 
-	if (!current_libinput_category) {
+	if (!state->current_libinput_category) {
 		return;
 	}
 
@@ -734,41 +732,41 @@ fill_libinput_category(char *nodename, char *content)
 		 * terms, for example: 'default', 'touch', 'touchpad' and
 		 * 'non-touch'
 		 */
-		current_libinput_category->type = get_device_type(content);
+		state->current_libinput_category->type = get_device_type(content);
 
 		/*
 		 * If we couldn't match against any of those terms, we use the
 		 * provided value to define the device name that the settings
 		 * should be applicable to.
 		 */
-		if (current_libinput_category->type == LAB_LIBINPUT_DEVICE_NONE) {
-			xstrdup_replace(current_libinput_category->name, content);
+		if (state->current_libinput_category->type == LAB_LIBINPUT_DEVICE_NONE) {
+			xstrdup_replace(state->current_libinput_category->name, content);
 		}
 	} else if (!strcasecmp(nodename, "naturalScroll")) {
-		set_bool_as_int(content, &current_libinput_category->natural_scroll);
+		set_bool_as_int(content, &state->current_libinput_category->natural_scroll);
 	} else if (!strcasecmp(nodename, "leftHanded")) {
-		set_bool_as_int(content, &current_libinput_category->left_handed);
+		set_bool_as_int(content, &state->current_libinput_category->left_handed);
 	} else if (!strcasecmp(nodename, "pointerSpeed")) {
-		set_float(content, &current_libinput_category->pointer_speed);
-		if (current_libinput_category->pointer_speed < -1) {
-			current_libinput_category->pointer_speed = -1;
-		} else if (current_libinput_category->pointer_speed > 1) {
-			current_libinput_category->pointer_speed = 1;
+		set_float(content, &state->current_libinput_category->pointer_speed);
+		if (state->current_libinput_category->pointer_speed < -1) {
+			state->current_libinput_category->pointer_speed = -1;
+		} else if (state->current_libinput_category->pointer_speed > 1) {
+			state->current_libinput_category->pointer_speed = 1;
 		}
 	} else if (!strcasecmp(nodename, "tap")) {
 		int ret = parse_bool(content, -1);
 		if (ret < 0) {
 			return;
 		}
-		current_libinput_category->tap = ret
+		state->current_libinput_category->tap = ret
 			? LIBINPUT_CONFIG_TAP_ENABLED
 			: LIBINPUT_CONFIG_TAP_DISABLED;
 	} else if (!strcasecmp(nodename, "tapButtonMap")) {
 		if (!strcmp(content, "lrm")) {
-			current_libinput_category->tap_button_map =
+			state->current_libinput_category->tap_button_map =
 				LIBINPUT_CONFIG_TAP_MAP_LRM;
 		} else if (!strcmp(content, "lmr")) {
-			current_libinput_category->tap_button_map =
+			state->current_libinput_category->tap_button_map =
 				LIBINPUT_CONFIG_TAP_MAP_LMR;
 		} else {
 			wlr_log(WLR_ERROR, "invalid tapButtonMap");
@@ -778,26 +776,57 @@ fill_libinput_category(char *nodename, char *content)
 		if (ret < 0) {
 			return;
 		}
-		current_libinput_category->tap_and_drag = ret
+		state->current_libinput_category->tap_and_drag = ret
 			? LIBINPUT_CONFIG_DRAG_ENABLED
 			: LIBINPUT_CONFIG_DRAG_DISABLED;
 	} else if (!strcasecmp(nodename, "dragLock")) {
+		if (!strcasecmp(content, "timeout")) {
+			/* "timeout" enables drag-lock with timeout */
+			state->current_libinput_category->drag_lock =
+				LIBINPUT_CONFIG_DRAG_LOCK_ENABLED;
+			return;
+		}
 		int ret = parse_bool(content, -1);
 		if (ret < 0) {
 			return;
 		}
-		current_libinput_category->drag_lock = ret
-			? LIBINPUT_CONFIG_DRAG_LOCK_ENABLED
-			: LIBINPUT_CONFIG_DRAG_LOCK_DISABLED;
+		/* "yes" enables drag-lock, without timeout if libinput >= 1.27 */
+		int enabled = LIBINPUT_CONFIG_DRAG_LOCK_ENABLED;
+#if HAVE_LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_STICKY
+		enabled = LIBINPUT_CONFIG_DRAG_LOCK_ENABLED_STICKY;
+#endif
+		state->current_libinput_category->drag_lock = ret ?
+			enabled : LIBINPUT_CONFIG_DRAG_LOCK_DISABLED;
+	} else if (!strcasecmp(nodename, "threeFingerDrag")) {
+#if HAVE_LIBINPUT_CONFIG_3FG_DRAG_ENABLED_3FG
+		if (!strcmp(content, "3")) {
+			state->current_libinput_category->three_finger_drag =
+				LIBINPUT_CONFIG_3FG_DRAG_ENABLED_3FG;
+		} else if (!strcmp(content, "4")) {
+			state->current_libinput_category->three_finger_drag =
+				LIBINPUT_CONFIG_3FG_DRAG_ENABLED_4FG;
+		} else {
+			int ret = parse_bool(content, -1);
+			if (ret < 0) {
+				return;
+			}
+			state->current_libinput_category->three_finger_drag = ret
+				? LIBINPUT_CONFIG_3FG_DRAG_ENABLED_3FG
+				: LIBINPUT_CONFIG_3FG_DRAG_DISABLED;
+		}
+#else
+		wlr_log(WLR_ERROR, "<threeFingerDrag> is only"
+			" supported in libinput >= 1.28");
+#endif
 	} else if (!strcasecmp(nodename, "accelProfile")) {
-		current_libinput_category->accel_profile =
+		state->current_libinput_category->accel_profile =
 			get_accel_profile(content);
 	} else if (!strcasecmp(nodename, "middleEmulation")) {
 		int ret = parse_bool(content, -1);
 		if (ret < 0) {
 			return;
 		}
-		current_libinput_category->middle_emu = ret
+		state->current_libinput_category->middle_emu = ret
 			? LIBINPUT_CONFIG_MIDDLE_EMULATION_ENABLED
 			: LIBINPUT_CONFIG_MIDDLE_EMULATION_DISABLED;
 	} else if (!strcasecmp(nodename, "disableWhileTyping")) {
@@ -805,29 +834,42 @@ fill_libinput_category(char *nodename, char *content)
 		if (ret < 0) {
 			return;
 		}
-		current_libinput_category->dwt = ret
+		state->current_libinput_category->dwt = ret
 			? LIBINPUT_CONFIG_DWT_ENABLED
 			: LIBINPUT_CONFIG_DWT_DISABLED;
 	} else if (!strcasecmp(nodename, "clickMethod")) {
 		if (!strcasecmp(content, "none")) {
-			current_libinput_category->click_method =
+			state->current_libinput_category->click_method =
 				LIBINPUT_CONFIG_CLICK_METHOD_NONE;
 		} else if (!strcasecmp(content, "clickfinger")) {
-			current_libinput_category->click_method =
+			state->current_libinput_category->click_method =
 				LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER;
 		} else if (!strcasecmp(content, "buttonAreas")) {
-			current_libinput_category->click_method =
+			state->current_libinput_category->click_method =
 				LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS;
 		} else {
 			wlr_log(WLR_ERROR, "invalid clickMethod");
 		}
+	} else if (!strcasecmp(nodename, "scrollMethod")) {
+		if (!strcasecmp(content, "none")) {
+			state->current_libinput_category->scroll_method =
+				LIBINPUT_CONFIG_SCROLL_NO_SCROLL;
+		} else if (!strcasecmp(content, "edge")) {
+			state->current_libinput_category->scroll_method =
+				LIBINPUT_CONFIG_SCROLL_EDGE;
+		} else if (!strcasecmp(content, "twofinger")) {
+			state->current_libinput_category->scroll_method =
+				LIBINPUT_CONFIG_SCROLL_2FG;
+		} else {
+			wlr_log(WLR_ERROR, "invalid scrollMethod");
+		}
 	} else if (!strcasecmp(nodename, "sendEventsMode")) {
-		current_libinput_category->send_events_mode =
+		state->current_libinput_category->send_events_mode =
 			get_send_events_mode(content);
 	} else if (!strcasecmp(nodename, "calibrationMatrix")) {
 		errno = 0;
-		current_libinput_category->have_calibration_matrix = true;
-		float *mat = current_libinput_category->calibration_matrix;
+		state->current_libinput_category->have_calibration_matrix = true;
+		float *mat = state->current_libinput_category->calibration_matrix;
 		gchar **elements = g_strsplit(content, " ", -1);
 		guint i = 0;
 		for (; elements[i]; ++i) {
@@ -837,19 +879,19 @@ fill_libinput_category(char *nodename, char *content)
 				wlr_log(WLR_ERROR, "invalid calibration matrix element"
 									" %s (index %d), expect six floats",
 									elements[i], i);
-				current_libinput_category->have_calibration_matrix = false;
+				state->current_libinput_category->have_calibration_matrix = false;
 				errno = 0;
 				break;
 			}
 		}
-		if (i != 6 && current_libinput_category->have_calibration_matrix) {
+		if (i != 6 && state->current_libinput_category->have_calibration_matrix) {
 			wlr_log(WLR_ERROR, "wrong number of calibration matrix elements,"
 								" expected 6, got %d", i);
-			current_libinput_category->have_calibration_matrix = false;
+			state->current_libinput_category->have_calibration_matrix = false;
 		}
 		g_strfreev(elements);
 	} else if (!strcasecmp(nodename, "scrollFactor")) {
-		set_double(content, &current_libinput_category->scroll_factor);
+		set_double(content, &state->current_libinput_category->scroll_factor);
 	}
 }
 
@@ -862,15 +904,38 @@ set_font_attr(struct font *font, const char *nodename, const char *content)
 		font->size = atoi(content);
 	} else if (!strcmp(nodename, "slant")) {
 		if (!strcasecmp(content, "italic")) {
-			font->slant = FONT_SLANT_ITALIC;
+			font->slant = PANGO_STYLE_ITALIC;
 		} else if (!strcasecmp(content, "oblique")) {
-			font->slant = FONT_SLANT_OBLIQUE;
+			font->slant = PANGO_STYLE_OBLIQUE;
 		} else {
-			font->slant = FONT_SLANT_NORMAL;
+			font->slant = PANGO_STYLE_NORMAL;
 		}
 	} else if (!strcmp(nodename, "weight")) {
-		font->weight = !strcasecmp(content, "bold") ?
-			FONT_WEIGHT_BOLD : FONT_WEIGHT_NORMAL;
+		if (!strcasecmp(content, "thin")) {
+			font->weight = PANGO_WEIGHT_THIN;
+		} else if (!strcasecmp(content, "ultralight")) {
+			font->weight = PANGO_WEIGHT_ULTRALIGHT;
+		} else if (!strcasecmp(content, "light")) {
+			font->weight = PANGO_WEIGHT_LIGHT;
+		} else if (!strcasecmp(content, "semilight")) {
+			font->weight = PANGO_WEIGHT_SEMILIGHT;
+		} else if (!strcasecmp(content, "book")) {
+			font->weight = PANGO_WEIGHT_BOOK;
+		} else if (!strcasecmp(content, "medium")) {
+			font->weight = PANGO_WEIGHT_MEDIUM;
+		} else if (!strcasecmp(content, "semibold")) {
+			font->weight = PANGO_WEIGHT_SEMIBOLD;
+		} else if (!strcasecmp(content, "bold")) {
+			font->weight = PANGO_WEIGHT_BOLD;
+		} else if (!strcasecmp(content, "ultrabold")) {
+			font->weight = PANGO_WEIGHT_ULTRABOLD;
+		} else if (!strcasecmp(content, "heavy")) {
+			font->weight = PANGO_WEIGHT_HEAVY;
+		} else if (!strcasecmp(content, "ultraheavy")) {
+			font->weight = PANGO_WEIGHT_ULTRAHEAVY;
+		} else {
+			font->weight = PANGO_WEIGHT_NORMAL;
+		}
 	}
 }
 
@@ -968,7 +1033,7 @@ set_tearing_mode(const char *str, enum tearing_mode *variable)
 }
 
 static void
-entry(xmlNode *node, char *nodename, char *content)
+entry(xmlNode *node, char *nodename, char *content, struct parser_state *state)
 {
 	/* current <theme><font place=""></font></theme> */
 	static enum font_place font_place = FONT_PLACE_NONE;
@@ -985,61 +1050,61 @@ entry(xmlNode *node, char *nodename, char *content)
 		printf("%s: %s\n", nodename, content);
 	}
 
-	if (in_usable_area_override) {
-		fill_usable_area_override(nodename, content);
+	if (state->in_usable_area_override) {
+		fill_usable_area_override(nodename, content, state);
 	}
-	if (in_keybind) {
-		if (in_action_query) {
+	if (state->in_keybind) {
+		if (state->in_action_query) {
 			fill_action_query(nodename, content,
-				current_keybind_action);
-		} else if (in_action_then_branch) {
+				state->current_keybind_action, state);
+		} else if (state->in_action_then_branch) {
 			fill_child_action(nodename, content,
-				current_keybind_action, "then");
-		} else if (in_action_else_branch) {
+				state->current_keybind_action, "then", state);
+		} else if (state->in_action_else_branch) {
 			fill_child_action(nodename, content,
-				current_keybind_action, "else");
-		} else if (in_action_none_branch) {
+				state->current_keybind_action, "else", state);
+		} else if (state->in_action_none_branch) {
 			fill_child_action(nodename, content,
-				current_keybind_action, "none");
+				state->current_keybind_action, "none", state);
 		} else {
-			fill_keybind(nodename, content);
+			fill_keybind(nodename, content, state);
 		}
 	}
-	if (in_mousebind) {
-		if (in_action_query) {
+	if (state->in_mousebind) {
+		if (state->in_action_query) {
 			fill_action_query(nodename, content,
-				current_mousebind_action);
-		} else if (in_action_then_branch) {
+				state->current_mousebind_action, state);
+		} else if (state->in_action_then_branch) {
 			fill_child_action(nodename, content,
-				current_mousebind_action, "then");
-		} else if (in_action_else_branch) {
+				state->current_mousebind_action, "then", state);
+		} else if (state->in_action_else_branch) {
 			fill_child_action(nodename, content,
-				current_mousebind_action, "else");
-		} else if (in_action_none_branch) {
+				state->current_mousebind_action, "else", state);
+		} else if (state->in_action_none_branch) {
 			fill_child_action(nodename, content,
-				current_mousebind_action, "none");
+				state->current_mousebind_action, "none", state);
 		} else {
-			fill_mousebind(nodename, content);
+			fill_mousebind(nodename, content, state);
 		}
 	}
-	if (in_touch) {
-		fill_touch(nodename, content);
+	if (state->in_touch) {
+		fill_touch(nodename, content, state);
 		return;
 	}
-	if (in_libinput_category) {
-		fill_libinput_category(nodename, content);
+	if (state->in_libinput_category) {
+		fill_libinput_category(nodename, content, state);
 		return;
 	}
-	if (in_regions) {
-		fill_region(nodename, content);
+	if (state->in_regions) {
+		fill_region(nodename, content, state);
 		return;
 	}
-	if (in_window_switcher_field) {
-		fill_window_switcher_field(nodename, content);
+	if (state->in_window_switcher_field) {
+		fill_window_switcher_field(nodename, content, state);
 		return;
 	}
-	if (in_window_rules) {
-		fill_window_rule(nodename, content);
+	if (state->in_window_rules) {
+		fill_window_rule(nodename, content, state);
 		return;
 	}
 
@@ -1059,7 +1124,24 @@ entry(xmlNode *node, char *nodename, char *content)
 		return;
 	}
 
-	/* handle the rest */
+	if (!strcasecmp(nodename, "prefix.desktops")) {
+		xstrdup_replace(rc.workspace_config.prefix, content ? content : "");
+		return;
+	}
+
+	/*
+	 * Nodenames where we want to honour !content have to be parsed above
+	 * this point. An example of this is:
+	 *
+	 *     <desktops>
+	 *       <prefix></prefix>
+	 *     </desktops>
+	 *
+	 * In the case of the <prefix> element having content, the node will be
+	 * processed twice; first for the element itself (with no content) and
+	 * then the content itself. In this situation xstrdup_replace() is
+	 * called twice, but the end result is the right one.
+	 */
 	if (!content) {
 		return;
 	}
@@ -1086,22 +1168,15 @@ entry(xmlNode *node, char *nodename, char *content)
 		set_bool(content, &rc.auto_enable_outputs);
 	} else if (!strcasecmp(nodename, "reuseOutputMode.core")) {
 		set_bool(content, &rc.reuse_output_mode);
+	} else if (!strcasecmp(nodename, "xwaylandPersistence.core")) {
+		set_bool(content, &rc.xwayland_persistence);
+	} else if (!strcasecmp(nodename, "primarySelection.core")) {
+		set_bool(content, &rc.primary_selection);
 	} else if (!strcmp(nodename, "policy.placement")) {
 		enum view_placement_policy policy = view_placement_parse(content);
 		if (policy != LAB_PLACE_INVALID) {
 			rc.placement_policy = policy;
 		}
-	} else if (!strcasecmp(nodename, "xwaylandPersistence.core")) {
-		set_bool(content, &rc.xwayland_persistence);
-
-#if LAB_WLR_VERSION_OLDER_THAN(0, 18, 2)
-		if (!rc.xwayland_persistence) {
-			wlr_log(WLR_ERROR, "to avoid the risk of a fatal crash, "
-				"setting xwaylandPersistence to 'no' is only "
-				"recommended when labwc is compiled against "
-				"wlroots >= 0.18.2. See #2371 for details.");
-		}
-#endif
 	} else if (!strcasecmp(nodename, "x.cascadeOffset.placement")) {
 		rc.placement_cascade_offset_x = atoi(content);
 	} else if (!strcasecmp(nodename, "y.cascadeOffset.placement")) {
@@ -1110,6 +1185,8 @@ entry(xmlNode *node, char *nodename, char *content)
 		xstrdup_replace(rc.theme_name, content);
 	} else if (!strcmp(nodename, "icon.theme")) {
 		xstrdup_replace(rc.icon_theme_name, content);
+	} else if (!strcasecmp(nodename, "fallbackAppIcon.theme")) {
+		xstrdup_replace(rc.fallback_app_icon_name, content);
 	} else if (!strcasecmp(nodename, "layout.titlebar.theme")) {
 		fill_title_layout(content);
 	} else if (!strcasecmp(nodename, "showTitle.titlebar.theme")) {
@@ -1120,6 +1197,8 @@ entry(xmlNode *node, char *nodename, char *content)
 		set_bool(content, &rc.ssd_keep_border);
 	} else if (!strcasecmp(nodename, "dropShadows.theme")) {
 		set_bool(content, &rc.shadows_enabled);
+	} else if (!strcasecmp(nodename, "dropShadowsOnTiled.theme")) {
+		set_bool(content, &rc.shadows_on_tiled);
 	} else if (!strcmp(nodename, "name.font.theme")) {
 		fill_font(nodename, content, font_place);
 	} else if (!strcmp(nodename, "size.font.theme")) {
@@ -1145,8 +1224,8 @@ entry(xmlNode *node, char *nodename, char *content)
 		/* This is deprecated. Show an error message in post_processing() */
 		set_double(content, &mouse_scroll_factor);
 	} else if (!strcasecmp(nodename, "name.context.mouse")) {
-		current_mouse_context = content;
-		current_mousebind = NULL;
+		state->current_mouse_context = content;
+		state->current_mousebind = NULL;
 
 	} else if (!strcasecmp(nodename, "repeatRate.keyboard")) {
 		rc.repeat_rate = atoi(content);
@@ -1241,8 +1320,6 @@ entry(xmlNode *node, char *nodename, char *content)
 		rc.workspace_config.popuptime = atoi(content);
 	} else if (!strcasecmp(nodename, "number.desktops")) {
 		rc.workspace_config.min_nr_workspaces = MAX(1, atoi(content));
-	} else if (!strcasecmp(nodename, "prefix.desktops")) {
-		xstrdup_replace(rc.workspace_config.prefix, content);
 	} else if (!strcasecmp(nodename, "popupShow.resize")) {
 		if (!strcasecmp(content, "Always")) {
 			rc.resize_indicator = LAB_RESIZE_INDICATOR_ALWAYS;
@@ -1255,6 +1332,10 @@ entry(xmlNode *node, char *nodename, char *content)
 		}
 	} else if (!strcasecmp(nodename, "drawContents.resize")) {
 		set_bool(content, &rc.resize_draw_contents);
+	} else if (!strcasecmp(nodename, "cornerRange.resize")) {
+		rc.resize_corner_range = atoi(content);
+	} else if (!strcasecmp(nodename, "minimumArea.resize")) {
+		rc.resize_minimum_area = MAX(0, atoi(content));
 	} else if (!strcasecmp(nodename, "mouseEmulation.tablet")) {
 		set_bool(content, &rc.tablet.force_mouse_emulation);
 	} else if (!strcasecmp(nodename, "mapToOutput.tablet")) {
@@ -1287,21 +1368,25 @@ entry(xmlNode *node, char *nodename, char *content)
 			tablet_get_dbl_if_positive(content, "relativeMotionSensitivity");
 	} else if (!strcasecmp(nodename, "ignoreButtonReleasePeriod.menu")) {
 		rc.menu_ignore_button_release_period = atoi(content);
+	} else if (!strcasecmp(nodename, "showIcons.menu")) {
+		set_bool(content, &rc.menu_show_icons);
 	} else if (!strcasecmp(nodename, "width.magnifier")) {
 		rc.mag_width = atoi(content);
 	} else if (!strcasecmp(nodename, "height.magnifier")) {
 		rc.mag_height = atoi(content);
 	} else if (!strcasecmp(nodename, "initScale.magnifier")) {
 		set_float(content, &rc.mag_scale);
+		rc.mag_scale = MAX(1.0, rc.mag_scale);
 	} else if (!strcasecmp(nodename, "increment.magnifier")) {
 		set_float(content, &rc.mag_increment);
+		rc.mag_increment = MAX(0, rc.mag_increment);
 	} else if (!strcasecmp(nodename, "useFilter.magnifier")) {
 		set_bool(content, &rc.mag_filter);
 	}
 }
 
 static void
-process_node(xmlNode *node)
+process_node(xmlNode *node, struct parser_state *state)
 {
 	char *content;
 	static char buffer[256];
@@ -1312,103 +1397,104 @@ process_node(xmlNode *node)
 		return;
 	}
 	name = nodename(node, buffer, sizeof(buffer));
-	entry(node, name, content);
+	entry(node, name, content, state);
 }
 
-static void xml_tree_walk(xmlNode *node);
+static void xml_tree_walk(xmlNode *node, struct parser_state *state);
 
 static void
-traverse(xmlNode *n)
+traverse(xmlNode *n, struct parser_state *state)
 {
 	xmlAttr *attr;
 
-	process_node(n);
+	process_node(n, state);
 	for (attr = n->properties; attr; attr = attr->next) {
-		xml_tree_walk(attr->children);
+		xml_tree_walk(attr->children, state);
 	}
-	xml_tree_walk(n->children);
+	xml_tree_walk(n->children, state);
 }
 
 static void
-xml_tree_walk(xmlNode *node)
+xml_tree_walk(xmlNode *node, struct parser_state *state)
 {
 	for (xmlNode *n = node; n && n->name; n = n->next) {
 		if (!strcasecmp((char *)n->name, "comment")) {
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "margin")) {
-			in_usable_area_override = true;
-			traverse(n);
-			in_usable_area_override = false;
+			state->in_usable_area_override = true;
+			traverse(n, state);
+			state->in_usable_area_override = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "keybind")) {
-			in_keybind = true;
-			traverse(n);
-			in_keybind = false;
+			state->in_keybind = true;
+			traverse(n, state);
+			state->in_keybind = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "mousebind")) {
-			in_mousebind = true;
-			traverse(n);
-			in_mousebind = false;
+			state->in_mousebind = true;
+			traverse(n, state);
+			state->in_mousebind = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "touch")) {
-			in_touch = true;
-			traverse(n);
-			in_touch = false;
+			state->in_touch = true;
+			traverse(n, state);
+			state->in_touch = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "device")) {
-			in_libinput_category = true;
-			traverse(n);
-			in_libinput_category = false;
+			state->in_libinput_category = true;
+			traverse(n, state);
+			state->in_libinput_category = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "regions")) {
-			in_regions = true;
-			traverse(n);
-			in_regions = false;
+			state->in_regions = true;
+			traverse(n, state);
+			state->in_regions = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "fields")) {
-			in_window_switcher_field = true;
-			traverse(n);
-			in_window_switcher_field = false;
+			clear_window_switcher_fields();
+			state->in_window_switcher_field = true;
+			traverse(n, state);
+			state->in_window_switcher_field = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "windowRules")) {
-			in_window_rules = true;
-			traverse(n);
-			in_window_rules = false;
+			state->in_window_rules = true;
+			traverse(n, state);
+			state->in_window_rules = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "query")) {
-			in_action_query = true;
-			traverse(n);
-			in_action_query = false;
+			state->in_action_query = true;
+			traverse(n, state);
+			state->in_action_query = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "then")) {
-			in_action_then_branch = true;
-			traverse(n);
-			in_action_then_branch = false;
+			state->in_action_then_branch = true;
+			traverse(n, state);
+			state->in_action_then_branch = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "else")) {
-			in_action_else_branch = true;
-			traverse(n);
-			in_action_else_branch = false;
+			state->in_action_else_branch = true;
+			traverse(n, state);
+			state->in_action_else_branch = false;
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "none")) {
-			in_action_none_branch = true;
-			traverse(n);
-			in_action_none_branch = false;
+			state->in_action_none_branch = true;
+			traverse(n, state);
+			state->in_action_none_branch = false;
 			continue;
 		}
-		traverse(n);
+		traverse(n, state);
 	}
 }
 
@@ -1422,7 +1508,8 @@ rcxml_parse_xml(struct buf *b)
 		wlr_log(WLR_ERROR, "error parsing config file");
 		return;
 	}
-	xml_tree_walk(xmlDocGetRootElement(d));
+	struct parser_state init_state = {0};
+	xml_tree_walk(xmlDocGetRootElement(d), &init_state);
 	xmlFreeDoc(d);
 	xmlCleanupParser();
 }
@@ -1431,8 +1518,8 @@ static void
 init_font_defaults(struct font *font)
 {
 	font->size = 10;
-	font->slant = FONT_SLANT_NORMAL;
-	font->weight = FONT_WEIGHT_NORMAL;
+	font->slant = PANGO_STYLE_NORMAL;
+	font->weight = PANGO_WEIGHT_NORMAL;
 }
 
 static void
@@ -1465,22 +1552,15 @@ rcxml_init(void)
 	rc.ssd_keep_border = true;
 	rc.corner_radius = 8;
 	rc.shadows_enabled = false;
+	rc.shadows_on_tiled = false;
 
 	rc.gap = 0;
 	rc.adaptive_sync = LAB_ADAPTIVE_SYNC_DISABLED;
 	rc.allow_tearing = false;
 	rc.auto_enable_outputs = true;
 	rc.reuse_output_mode = false;
-
-#if LAB_WLR_VERSION_OLDER_THAN(0, 18, 2)
-	/*
-	 * For wlroots < 0.18.2, keep xwayland alive by default to work around
-	 * a fatal crash when the X server is terminated during drag-and-drop.
-	 */
-	rc.xwayland_persistence = true;
-#else
 	rc.xwayland_persistence = false;
-#endif
+	rc.primary_selection = true;
 
 	init_font_defaults(&rc.font_activewindow);
 	init_font_defaults(&rc.font_inactivewindow);
@@ -1511,7 +1591,7 @@ rcxml_init(void)
 	rc.unsnap_threshold = 20;
 	rc.unmaximize_threshold = 150;
 
-	rc.snap_edge_range = 1;
+	rc.snap_edge_range = 10;
 	rc.snap_overlay_enabled = true;
 	rc.snap_overlay_delay_inner = 500;
 	rc.snap_overlay_delay_outer = 500;
@@ -1527,11 +1607,14 @@ rcxml_init(void)
 
 	rc.resize_indicator = LAB_RESIZE_INDICATOR_NEVER;
 	rc.resize_draw_contents = true;
+	rc.resize_corner_range = -1;
+	rc.resize_minimum_area = 8;
 
 	rc.workspace_config.popuptime = INT_MIN;
 	rc.workspace_config.min_nr_workspaces = 1;
 
 	rc.menu_ignore_button_release_period = 250;
+	rc.menu_show_icons = true;
 
 	rc.mag_width = 400;
 	rc.mag_height = 400;
@@ -1678,22 +1761,25 @@ deduplicate_key_bindings(void)
 	}
 }
 
-static struct {
-	enum window_switcher_field_content content;
-	int width;
-} fields[] = {
-	{ LAB_FIELD_TYPE, 25 },
-	{ LAB_FIELD_TRIMMED_IDENTIFIER, 25 },
-	{ LAB_FIELD_TITLE, 50 },
-	{ LAB_FIELD_NONE, 0 },
-};
-
 static void
 load_default_window_switcher_fields(void)
 {
-	struct window_switcher_field *field;
+	static const struct {
+		enum window_switcher_field_content content;
+		int width;
+	} fields[] = {
+#if HAVE_LIBSFDO
+		{ LAB_FIELD_ICON, 5 },
+		{ LAB_FIELD_DESKTOP_ENTRY_NAME, 30 },
+		{ LAB_FIELD_TITLE, 65 },
+#else
+		{ LAB_FIELD_DESKTOP_ENTRY_NAME, 30 },
+		{ LAB_FIELD_TITLE, 70 },
+#endif
+	};
 
-	for (int i = 0; fields[i].content != LAB_FIELD_NONE; i++) {
+	struct window_switcher_field *field;
+	for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
 		field = znew(*field);
 		field->content = fields[i].content;
 		field->width = fields[i].width;
@@ -1714,8 +1800,25 @@ post_processing(void)
 		load_default_mouse_bindings();
 	}
 
+	if (!rc.fallback_app_icon_name) {
+		rc.fallback_app_icon_name = xstrdup("labwc");
+	}
+
+	if (!rc.icon_theme_name && rc.theme_name) {
+		rc.icon_theme_name = xstrdup(rc.theme_name);
+	}
+
 	if (!rc.title_layout_loaded) {
+#if HAVE_LIBSFDO
 		fill_title_layout("icon:iconify,max,close");
+#else
+		/*
+		 * 'icon' is replaced with 'menu' in fill_title_layout() when
+		 * libsfdo is not linked, but we also replace it here not to
+		 * show error message with default settings.
+		 */
+		fill_title_layout("menu:iconify,max,close");
+#endif
 	}
 
 	/*
@@ -1765,13 +1868,20 @@ post_processing(void)
 		if (!rc.workspace_config.prefix) {
 			rc.workspace_config.prefix = xstrdup(_("Workspace"));
 		}
+
+		struct buf b = BUF_INIT;
 		struct workspace *workspace;
 		for (int i = nr_workspaces; i < rc.workspace_config.min_nr_workspaces; i++) {
 			workspace = znew(*workspace);
-			workspace->name = strdup_printf("%s %d",
-				rc.workspace_config.prefix, i + 1);
+			if (!string_null_or_empty(rc.workspace_config.prefix)) {
+				buf_add_fmt(&b, "%s ", rc.workspace_config.prefix);
+			}
+			buf_add_fmt(&b, "%d", i + 1);
+			workspace->name = xstrdup(b.data);
 			wl_list_append(&rc.workspace_config.workspaces, &workspace->link);
+			buf_clear(&b);
 		}
+		buf_reset(&b);
 	}
 	if (rc.workspace_config.popuptime == INT_MIN) {
 		rc.workspace_config.popuptime = 1000;
@@ -1779,10 +1889,6 @@ post_processing(void)
 	if (!wl_list_length(&rc.window_switcher.fields)) {
 		wlr_log(WLR_INFO, "load default window switcher fields");
 		load_default_window_switcher_fields();
-	}
-
-	if (rc.mag_scale <= 0.0) {
-		rc.mag_scale = 1.0;
 	}
 }
 
@@ -1872,9 +1978,11 @@ validate(void)
 	validate_actions();
 
 	/* OSD fields */
+	int field_width_sum = 0;
 	struct window_switcher_field *field, *field_tmp;
 	wl_list_for_each_safe(field, field_tmp, &rc.window_switcher.fields, link) {
-		if (!osd_field_validate(field)) {
+		field_width_sum += field->width;
+		if (!osd_field_is_valid(field) || field_width_sum > 100) {
 			wlr_log(WLR_ERROR, "Deleting invalid window switcher field %p", field);
 			wl_list_remove(&field->link);
 			osd_field_free(field);
@@ -1956,18 +2064,11 @@ rcxml_finish(void)
 	zfree(rc.font_osd.name);
 	zfree(rc.theme_name);
 	zfree(rc.icon_theme_name);
+	zfree(rc.fallback_app_icon_name);
 	zfree(rc.workspace_config.prefix);
 	zfree(rc.tablet.output_name);
 
-	struct title_button *p, *p_tmp;
-	wl_list_for_each_safe(p, p_tmp, &rc.title_buttons_left, link) {
-		wl_list_remove(&p->link);
-		zfree(p);
-	}
-	wl_list_for_each_safe(p, p_tmp, &rc.title_buttons_right, link) {
-		wl_list_remove(&p->link);
-		zfree(p);
-	}
+	clear_title_layout();
 
 	struct usable_area_override *area, *area_tmp;
 	wl_list_for_each_safe(area, area_tmp, &rc.usable_area_overrides, link) {
@@ -2014,11 +2115,7 @@ rcxml_finish(void)
 
 	regions_destroy(NULL, &rc.regions);
 
-	struct window_switcher_field *field, *field_tmp;
-	wl_list_for_each_safe(field, field_tmp, &rc.window_switcher.fields, link) {
-		wl_list_remove(&field->link);
-		osd_field_free(field);
-	}
+	clear_window_switcher_fields();
 
 	struct window_rule *rule, *rule_tmp;
 	wl_list_for_each_safe(rule, rule_tmp, &rc.window_rules, link) {
@@ -2026,19 +2123,5 @@ rcxml_finish(void)
 	}
 
 	/* Reset state vars for starting fresh when Reload is triggered */
-	current_usable_area_override = NULL;
-	current_keybind = NULL;
-	current_mousebind = NULL;
-	current_touch = NULL;
-	current_libinput_category = NULL;
-	current_mouse_context = NULL;
-	current_keybind_action = NULL;
-	current_mousebind_action = NULL;
-	current_child_action = NULL;
-	current_view_query = NULL;
-	current_region = NULL;
-	current_field = NULL;
-	current_window_rule = NULL;
-	current_window_rule_action = NULL;
 	mouse_scroll_factor = -1;
 }

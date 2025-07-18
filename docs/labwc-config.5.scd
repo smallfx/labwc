@@ -56,6 +56,9 @@ re-loaded on --reconfigure.
 Any environment variables referenced as $VARIABLE or ${VARIABLE} will be
 substituted and the tilde (~) will be expanded as the user's home directory.
 
+Any line beginning with the character '#' in an environment file will be treated
+as a comment. Trailing comments are not supported.
+
 Please note that as labwc reloads the environment file(s) on reconfigure,
 recursive/circular assignments (for example FOO=$FOO:bar) should not be made.
 
@@ -173,17 +176,18 @@ this is for compatibility with Openbox.
   <allowTearing>no</allowTearing>
   <autoEnableOutputs>yes</autoEnableOutputs>
   <reuseOutputMode>no</reuseOutputMode>
-  <xwaylandPersistence>yes</xwaylandPersistence>
+  <xwaylandPersistence>no</xwaylandPersistence>
+  <primarySelection>yes</primarySelection>
 </core>
 ```
 
 *<core><decoration>* [server|client]
-	Specify server or client side decorations for xdg-shell views. Note
+	Specify server or client side decorations for xdg-shell windows. Note
 	that it is not always possible to turn off client side decorations.
 	Default is server.
 
 *<core><gap>*
-	The distance in pixels between views and output edges when using
+	The distance in pixels between windows and output edges when using
 	movement actions, for example MoveToEdge. Default is 0.
 
 *<core><adaptiveSync>* [yes|no|fullscreen]
@@ -228,14 +232,15 @@ this is for compatibility with Openbox.
 *<core><xwaylandPersistence>* [yes|no]
 	Keep XWayland alive even when no clients are connected, rather than
 	using a "lazy" policy that allows the server to launch on demand and die
-	when it is no longer needed.
-
-	When labwc is compiled with wlroots 0.18.2 or later, the default is no.
-	When labwc is compiled with wlroots < 0.18.2, the default is yes to
-	avoid a wlroots bug that can result in compositor crashes when
-	performing drag-and-drop actions when the XWayland server is shut down.
+	when it is no longer needed. Default is no.
 
 	Note: changing this setting requires a restart of labwc.
+
+*<core><primarySelection>* [yes|no]
+	Enable or disable the primary selection clipboard. May only be
+	configured at launch. This enables autoscroll (middle-click to scroll
+	up/down) in Chromium and electron based clients without inadvertantly
+	pasting the primary clipboard. Default is yes.
 
 ## PLACEMENT
 
@@ -269,9 +274,9 @@ this is for compatibility with Openbox.
 ```
 <windowSwitcher show="yes" preview="yes" outlines="yes" allWorkspaces="no">
   <fields>
-    <field content="type" width="25%"/>
-    <field content="trimmed_identifier" width="25%"/>
-    <field content="title" width="50%"/>
+    <field content="icon" width="5%" />
+    <field content="desktop_entry_name" width="30%" />
+    <field content="title" width="65%" />
   </fields>
 </windowSwitcher>
 ```
@@ -295,53 +300,58 @@ this is for compatibility with Openbox.
 
 	*content* defines what the field shows and can be any of:
 
-		- *type* Show view type ("xdg-shell" or "xwayland")
+	- *type* Show window type ("xdg-shell" or "xwayland")
 
-		- *identifier* Show identifier (app_id for native Wayland
-		  windows and WM_CLASS for XWayland clients)
+	- *identifier* Show identifier (app_id for native Wayland
+	  windows and WM_CLASS for XWayland clients)
 
-		- *trimmed_identifier* Show trimmed identifier. Trimming removes
-		  the first two nodes of 'org.' strings.
+	- *trimmed_identifier* Show trimmed identifier. Trimming removes
+	  the first two nodes of 'org.' strings.
 
-		- *desktop_entry_name* Show application name from freedesktop.org desktop
-		  entry/file. Falls back to trimmed identifier (trimmed_identifier).
+	- *icon* Show application icon
 
-		- *title* Show window title if different to app_id
+	- *desktop_entry_name* Show application name from freedesktop.org
+	  desktop entry/file. Falls back to trimmed identifier
+	  (trimmed_identifier).
 
-		- *workspace* Show workspace name
+	- *title* Show window title
 
-		- *state* Show window state, M/m/F (max/min/full)
+	- *workspace* Show workspace name
 
-		- *type_short* Show view type ("W" or "X")
+	- *state* Show window state, M/m/F (max/min/full)
 
-		- *output* Show output id, if more than one output detected
+	- *type_short* Show window type ("W" or "X")
 
-		- *custom* A printf style config that can replace all the above
-		  fields are:
-			- 'B' - shell type, values [xwayland|xdg-shell]
-			- 'b' - shell type (short form), values [X|W]
-			- 'S' - state of window, values [M|m|F] (3 spaces allocated)
-			        (maximized, minimized, fullscreen)
-			- 's' - state of window (short form), values [M|m|F] (1 space)
-			- 'I' - wm-class/app-id
-			- 'i' - wm-class/app-id trimmed, remove "org." if available
-			- 'n' - desktop entry/file application name, falls back to
-			        wm-class/app-id trimmed
-			- 'W' - workspace name
-			- 'w' - workspace name (if more than 1 ws configured)
-			- 'O' - output name
-			- 'o' - output name (show if more than 1 monitor active)
-			- 'T' - title of window
-			- 't' - title of window (if different than wm-class/app-id)
-		  Recommend using with a monospace font, to keep alignment.
-		- *custom - subset of printf options allowed -- man 3 printf*
-			- random text may be inserted
-			- field length, example "%10" use 10 spaces, even if text uses less
-			- left justify text, example "%-"
-			- right justify text, example "%" instead of "%-"
-			- example, %-10 would left justify and make room for 10 characters
-		- Only one custom format allowed now. Future enhancements may
-		  allow more than one.
+	- *output* Show output id
+
+	- *custom* A printf style config that can replace all the above
+	  fields are:
+		- 'B' - shell type, values [xwayland|xdg-shell]
+		- 'b' - shell type (short form), values [X|W]
+		- 'S' - state of window, values [M|m|F] (3 spaces allocated)
+		        (maximized, minimized, fullscreen)
+		- 's' - state of window (short form), values [M|m|F] (1 space)
+		- 'I' - wm-class/app-id
+		- 'i' - wm-class/app-id trimmed, remove "org." if available
+		- 'n' - desktop entry/file application name, falls back to
+		        wm-class/app-id trimmed
+		- 'W' - workspace name
+		- 'w' - workspace name (if more than 1 ws configured)
+		- 'O' - output name
+		- 'o' - output name (show if more than 1 monitor active)
+		- 'T' - title of window
+		- 't' - title of window (if different than wm-class/app-id)
+	  Recommend using with a monospace font, to keep alignment.
+	- *custom - subset of printf options allowed -- man 3 printf*
+		- random text may be inserted
+		- field length, example "%10" use 10 spaces, even if text uses
+		  less
+		- left justify text, example "%-"
+		- right justify text, example "%" instead of "%-"
+		- example, %-10 would left justify and make room for 10
+		  characters
+	- Only one custom format allowed now. Future enhancements may
+	  allow more than one.
 
 	*width* defines the width of the field expressed as a percentage of
 	the overall window switcher width. The "%" character is required.
@@ -374,7 +384,7 @@ this is for compatibility with Openbox.
 	window to be moved with an interactive move. Default is 20.
 
 *<resistance><unMaximizeThreshold>*
-	Sets the one-dimentional movement of cursor in pixel required for a
+	Sets the one-dimensional movement of cursor in pixel required for a
 	*vertically or horizontally* maximized window to be moved with an
 	interactive move. Default is 150.
 
@@ -406,7 +416,7 @@ extending outward from the snapped edge.
 	If an interactive move ends with the cursor a maximum distance *range*,
 	(in pixels) from the edge of an output, the move will trigger a
 	SnapToEdge action for that edge. A *range* of 0 disables snapping via
-	interactive moves. Default is 1.
+	interactive moves. Default is 10.
 
 *<snapping><overlay><enabled>* [yes|no]
 	Show an overlay when snapping to a window to an edge. Default is yes.
@@ -427,7 +437,7 @@ extending outward from the snapped edge.
 *<snapping><notifyClient>* [always|region|edge|never]
 	Snapping windows can trigger corresponding tiling events for native
 	Wayland clients. Clients may use these events to alter their rendering
-	based on knowledge that some edges of the view are confined to edges of
+	based on knowledge that some edges of the window are confined to edges of
 	a snapping region or output. For example, rounded corners may become
 	square when tiled, or media players may letter-box or pillar-box video
 	rather than imposing rigid aspect ratios on windows that will violate
@@ -481,7 +491,13 @@ extending outward from the snapped edge.
 	The name of the Openbox theme to use. It is not set by default.
 
 *<theme><icon>*
-	The name of the icon theme to use. It is not set by default.
+	The name of the icon theme to use. Inherits *<theme><name>* if not set.
+
+*<theme><fallbackAppIcon>*
+	The name of the icon to use as a fallback when the application icon
+	(e.g. window icon in the titlebar) is not available. The name follows
+	the ones specified in "Icon=" entries in desktop files.
+	Default is 'labwc'.
 
 *<theme><titlebar><layout>*
 	Selection and order of buttons in a window's titlebar.
@@ -513,6 +529,12 @@ extending outward from the snapped edge.
 *<theme><dropShadows>* [yes|no]
 	Should drop-shadows be rendered behind windows. Default is no.
 
+*<theme><dropShadowsOnTiled>* [yes|no]
+	Should drop-shadows be rendered behind tiled windows. This won't take
+	effect if <core><gap> is smaller than window.active.shadow.size in theme.
+
+	Default is no.
+
 *<theme><font place="">*
 	The font to use for a specific element of a window, menu or OSD.
 	Places can be any of:
@@ -535,7 +557,8 @@ extending outward from the snapped edge.
 	Font slant (normal, oblique or italic). Default is normal.
 
 *<theme><font place=""><weight>*
-	Font weight (normal or bold). Default is normal.
+	Font weight (normal, thin, ultralight, light, semilight, book, medium,
+	semibold, bold, ultrabold, heavy, ultraheavy). Default is normal.
 
 ## MARGIN
 
@@ -569,6 +592,20 @@ extending outward from the snapped edge.
 	Let the application redraw its contents while resizing. If disabled, an
 	outlined rectangle is shown to indicate the geometry of resized window.
 	Default is yes.
+
+*<resize><cornerRange>*
+	The size of corner regions to which the 'TLCorner', 'TRCorner',
+	'BLCorner' and 'RLCorner' mousebind contexts apply, as well as the size
+	of the border region for which mouse resizing will apply both
+	horizontally and vertically rather than one or the other. Default is
+	half the titlebar height.
+
+*<resize><minimumArea>*
+	Treat borders of server-side decorations as if they were at least the
+	indicated thickness, regardless of their visual size. Borders visually
+	narrower than the minimum effective thickness will be augmented with
+	invisible zones just beyond the window that serve as click targets for
+	mouse actions. Default is 8.
 
 ## KEYBOARD
 
@@ -658,11 +695,9 @@ extending outward from the snapped edge.
 ```
   A-Tab - next window
   A-S-Tab - previous window
-  W-Return - alacritty
-  A-F3 - run bemenu
+  W-Return - lab-sensible-terminal
   A-F4 - close window
   W-a - toggle maximize
-  A-<arrow> - move window to edge
   W-<arrow> - resize window to fill half the output
   A-Space - show window menu
 ```
@@ -697,7 +732,8 @@ extending outward from the snapped edge.
 	- Iconify: A button that, by default, iconifies a window.
 	- Maximize: A button that, by default, toggles maximization of a window.
 	- Shade: A button that, by default, toggles window shading.
-	- AllDesktops: A button that, by default, toggles omnipresence of a window.
+	- AllDesktops: A button that, by default, toggles omnipresence of a
+	  window.
 	- Close: A button that, by default, closses a window.
 	- Top: The top edge of the window's border.
 	- Bottom: The bottom edge of the window's border.
@@ -734,7 +770,11 @@ extending outward from the snapped edge.
 	Mouse buttons and directions can be combined with modifier-keys
 	(shift (S), super/logo (W), control (C), alt (A), meta (M) and
 	hyper (H)), for example:
-	<mousebind button="A-Right" action="Press">
+
+```
+<mousebind button="A-Right" action="Press">...
+<mousebind direction="W-Up" action="Scroll">...
+```
 
 	Supported mouse *actions* include:
 	- Press: Pressing the specified button down in the context.
@@ -743,6 +783,37 @@ extending outward from the snapped edge.
 	- DoubleClick: Two presses within the doubleClickTime.
 	- Drag: Pressing the button within the context, then moving the cursor.
 	- Scroll: Scrolling in specified *direction* in the context.
+
+	Example to resize window on Logo + Shift + ScrollUp:
+
+```
+<?xml version="1.0"?>
+<labwc_config>
+<mouse>
+  <default />
+  <context name="Frame">
+    <mousebind direction="W-S-Up" action="Scroll">
+      <action name="ResizeRelative" left="10%" right="10%" top="10%" bottom="10%" />
+    </mousebind>
+    <mousebind button="W-Left" action="Drag">
+      <action name="Move" />
+    </mousebind>
+  </context>
+</mouse>
+</labwc_config>
+```
+
+	Example to un-bind the default Super + left-button-press to move window:
+
+```
+<mouse>
+  <default/>
+  <context name="Frame">
+    <mousebind button="W-Left" action="Press"/>
+    <mousebind button="W-Left" action="Drag"/>
+  </context>
+</mouse>
+```
 
 *<mouse><default />*
 	Load default mousebinds. This is an addition to the openbox
@@ -850,13 +921,15 @@ extending outward from the snapped edge.
 	available mouse	buttons. If not specified otherwise, the tip is
 	mapped to left mouse click, the first pen button (Stylus) is mapped
 	to right mouse button click and the second pen button (Stylus2)
-	emulates a middle mouse	button click.
+	emulates a middle mouse	button click. Buttons of a tablet tool mouse
+	are by default mapped to their (regular) mouse counterparts.
 
 	Supported map *buttons* for mouse emulation are:
 	- Tip
 	- Stylus
 	- Stylus2
 	- Stylus3
+	- Left..Task
 	- Pad
 	- Pad2..Pad9
 
@@ -893,9 +966,11 @@ extending outward from the snapped edge.
     <tapButtonMap></tapButtonMap>
     <tapAndDrag></tapAndDrag>
     <dragLock></dragLock>
+    <threeFingerDrag></threeFingerDrag>
     <middleEmulation></middleEmulation>
     <disableWhileTyping></disableWhileTyping>
     <clickMethod></clickMethod>
+    <scrollMethod></scrollMethod>
     <sendEventsMode></sendEventsMode>
     <calibrationMatrix></calibrationMatrix>
     <scrollFactor>1.0</scrollFactor>
@@ -960,9 +1035,23 @@ extending outward from the snapped edge.
 	Enable or disable tap-and-drag for this category. Tap-and-drag processes
 	a tap immediately followed by a finger down as the start of a drag.
 
-*<libinput><device><dragLock>* [yes|no]
-	Enable or disable drag lock for this category. Drag lock ignores a
-	momentary release of a finger during tap-and-dragging.
+*<libinput><device><dragLock>* [yes|no|timeout]
+	Enable or disable drag lock for this category. Drag lock ignores a temporary
+	release of a finger during tap-and-dragging.
+
+	*timeout* also enables drag lock, but with a timeout: if your fingers are
+	released for a certain amount of time, the drag gesture is cancelled.
+	In libinput < 1.27, the behavior of *yes* is equivalent to *timeout*.
+
+*<libinput><device><threeFingerDrag>* [yes|no|3|4]
+	Enable or disable the three-finger drag feature. When enabled, three
+	fingers down will result in a button down event and subsequent finger
+	motions triggers a drag.
+
+	The available options are:
+	- *no* - Disable three-finger drag.
+	- *yes* | *3* - Enable three-finger drag for 3 fingers.
+	- *4* - Enable three-finger drag for 4 fingers.
 
 *<libinput><device><middleEmulation>* [yes|no]
 	Enable or disable middle button emulation for this category. Middle
@@ -987,6 +1076,19 @@ extending outward from the snapped edge.
 	  left, right or middle button event without regard to the location of a
 	  click.
 	- *none* - Physical clicks will not produce button events.
+
+	The default method depends on the touchpad hardware.
+
+*<libinput><device><scrollMethod>* [none|twofinger|edge]
+	Configure the method by which physical movements on a touchpad are
+	mapped to scroll events.
+
+	The scroll methods available are:
+	- *twofinger* - Scroll by two fingers being placed on the surface of the
+	  touchpad, then moving those fingers vertically or horizontally.
+	- *edge* - Scroll by moving a single finger along the right edge
+	  (vertical scroll) or bottom edge (horizontal scroll).
+	- *none* - No scroll events will be produced.
 
 	The default method depends on the touchpad hardware.
 
@@ -1078,7 +1180,7 @@ sandboxAppId="" type="" matchOnce="">*
 
 *Properties*
 
-Property values can be *yes*, *no* or *default*.
+Most property values can be *yes*, *no* or *default*.
 
 If a window matches criteria for multiple rules which set the same property,
 later config entries have higher priority. *default* can be useful in this
@@ -1110,11 +1212,22 @@ situation.
 	can be caused by *<margin>* settings or exclusive layer-shell clients
 	such as panels.
 
+*<windowRules><windowRule iconPriority="">* [client|server]
+	By default, labwc tries to find application icons based on their
+	app-id, either via .desktop file or by finding an icon with the same
+	name. If that fails labwc will then try to use client supplied icons,
+	accomplished with the xdg-toplevel-icon protocol for wayland native
+	applications or the \_NET_WM_ICON property for X11 applications.
+
+	This property allows prioritizing client supplied icons for specific
+	applications. Default is server.
+
 ## MENU
 
 ```
 <menu>
   <ignoreButtonReleasePeriod>250</ignoreButtonReleasePeriod>
+  <showIcons>yes</showIcons>
 </menu>
 ```
 
@@ -1127,6 +1240,11 @@ situation.
 	anticipated that most users will want to change this, but the config
 	option has been exposed for unusual use-cases. It is equivalent to
 	Openbox's `<hideDelay>`. Default is 250 ms.
+
+*<menu><showIcons>*
+	Show menu icons based on the `icon` attribute of menu label elements.
+	Default is yes. Requires libsfdo. If labwc is built without it, no
+	icons will be shown.
 
 ## MAGNIFIER
 

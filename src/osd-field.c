@@ -7,9 +7,7 @@
 #include "view.h"
 #include "workspaces.h"
 #include "labwc.h"
-#if HAVE_LIBSFDO
 #include "desktop-entry.h"
-#endif
 #include "osd.h"
 
 /* includes '%', terminating 's' and NULL byte, 8 is enough for %-9999s */
@@ -321,18 +319,18 @@ osd_field_arg_from_xml_node(struct window_switcher_field *field,
 			field->content = LAB_FIELD_IDENTIFIER;
 		} else if (!strcmp(content, "trimmed_identifier")) {
 			field->content = LAB_FIELD_TRIMMED_IDENTIFIER;
+		} else if (!strcmp(content, "icon")) {
+			field->content = LAB_FIELD_ICON;
 		} else if (!strcmp(content, "desktop_entry_name")) {
 			field->content = LAB_FIELD_DESKTOP_ENTRY_NAME;
 		} else if (!strcmp(content, "title")) {
-			/* Keep old defaults */
-			field->content = LAB_FIELD_TITLE_SHORT;
+			field->content = LAB_FIELD_TITLE;
 		} else if (!strcmp(content, "workspace")) {
 			field->content = LAB_FIELD_WORKSPACE;
 		} else if (!strcmp(content, "state")) {
 			field->content = LAB_FIELD_WIN_STATE;
 		} else if (!strcmp(content, "output")) {
-			/* Keep old defaults */
-			field->content = LAB_FIELD_OUTPUT_SHORT;
+			field->content = LAB_FIELD_OUTPUT;
 		} else if (!strcmp(content, "custom")) {
 			field->content = LAB_FIELD_CUSTOM;
 		} else {
@@ -352,7 +350,7 @@ osd_field_arg_from_xml_node(struct window_switcher_field *field,
 }
 
 bool
-osd_field_validate(struct window_switcher_field *field)
+osd_field_is_valid(struct window_switcher_field *field)
 {
 	if (field->content == LAB_FIELD_NONE) {
 		wlr_log(WLR_ERROR, "Invalid OSD field: no content set");

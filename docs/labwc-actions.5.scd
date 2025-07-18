@@ -85,6 +85,7 @@ Actions are used in menus and keyboard/mouse bindings.
 	Tries to prevent any part of the window from going off-screen.
 	This action is deprecated from v0.7.3. To ensure your config works in
 	future labwc releases, please use:
+
 	*<action name="AutoPlace" policy="cursor">*
 
 *<action name="MoveRelative" x="" y="" />*
@@ -114,7 +115,8 @@ Actions are used in menus and keyboard/mouse bindings.
 
 *<action name="NextWindow" />*++
 *<action name="PreviousWindow" />*
-	Cycle focus to next/previous window respectively.++
+	Cycle focus to next/previous window, respectively.
+
 	Default keybind for NextWindow is Alt-Tab.
 
 	The arrow keys are used to move forwards/backwards while cycling.
@@ -156,6 +158,21 @@ Actions are used in menus and keyboard/mouse bindings.
 	be shown on, and will be relative to the left/top edge of the menu
 	window and monitor for positive values, and to the right/bottom edge
 	for negative values.
+
+	The example below demonstrates how the 'root-menu' can be opened from a
+	bottom aligned panel using the command `wtype -M logo -k Space`:
+
+```
+<keybind key="W-Space">
+  <action name="ShowMenu">
+  <menu>root-menu</menu>
+  <position>
+    <x>0</x>
+    <y>-0</y>
+  </position>
+  </action>
+</keybind>
+```
 
 *<action name="SetDecorations" decorations="value" forceSSD="no" />*
 	Set decorations of focused window.
@@ -264,8 +281,8 @@ Actions are used in menus and keyboard/mouse bindings.
 	Switch to workspace.
 
 	*to* The workspace to switch to. Supported values are "current", "last",
-	"left", "right" or the full name of a workspace or its index (starting
-	at 1) as configured in rc.xml.
+	"left", "right", "left-occupied", "right-occupied" or the full name of a
+	workspace or its index (starting at 1) as configured in rc.xml.
 
 	*wrap* [yes|no] Wrap around from last desktop to first, and vice
 	versa. Default yes.
@@ -343,18 +360,38 @@ Actions are used in menus and keyboard/mouse bindings.
 
 	*to* [output|window] Specifies the target area of the warp.
 	Default is "output"
-	*x* [center|value] Specifies the horizontal warp position within the target area.
-	"center": Moves the cursor to the horizontal center of the target area.
-	Positive or negative integers warp the cursor to a position offset by the specified
-	number of pixels from the left or right edge of the target area respectively.
-	Default is "center"
-	*y* [center|value] Equivalent for the vertical warp position within the target area.
-	Default is "center"
+
+	*x* [center|value] Specifies the horizontal warp position within the
+	target area. "center": Moves the cursor to the horizontal center of the
+	target area. Positive or negative integers warp the cursor to a position
+	offset by the specified	number of pixels from the left or right edge of
+	the target area, respectively. Default is "center"
+
+	*y* [center|value] Equivalent for the vertical warp position within the
+	target area. Default is "center"
+
+*<action name="HideCursor" />*
+	Hide the pointer or stylus cursor. The cursor becomes visible again on
+	following pointer actions, stylus actions or touchpad gestures.
+	Use together with the WarpCursor action to not just hide the cursor but
+	to additionally move it away to prevent e.g. hover effects.
+
+*<action name="EnableScrollWheelEmulation" />*++
+*<action name="DisableScrollWheelEmulation" />*++
+*<action name="ToggleScrollWheelEmulation">*
+	Enable, disable or toggle scroll wheel emulation on cursor motion,
+	respectively. This can be useful for trackball mouses to use the
+	rotating ball not just for moving the cursor, but also for (mouse wheel)
+	scrolling.
+
+	See also *<libinput><scrollFactor>* in labwc-config(5) for fine tuning
+	the scroll speed.
 
 *<action name="EnableTabletMouseEmulation" />*++
 *<action name="DisableTabletMouseEmulation" />*++
 *<action name="ToggleTabletMouseEmulation">*
-	Enable, disable or toggle mouse emulation for drawing tablets respectively.
+	Enable, disable or toggle mouse emulation for drawing tablets,
+	respectively.
 
 *<action name="ToggleMagnify">*
 	Toggle the screen magnifier on or off at the last magnification level
@@ -432,8 +469,10 @@ Actions that execute other actions. Used in keyboard/mouse bindings.
 		*desktop*
 			The desktop the client is currently on. This can be the
 			number or name of a desktop, or special relative values
-			"current", "other", "left", "right" or "last". The
-			"left" and "right" directions will not wrap.
+			"current", "other", "left", "right", "left-occupied",
+			"right-occupied" or "last".
+			The "left" , "right", "left-occupied" and
+			"right-occupied" directions will not wrap.
 
 		*tiled* [up|right|down|left|center]
 			Whether the client is tiled (snapped) along the the

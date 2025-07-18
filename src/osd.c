@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include "config.h"
 #include <assert.h>
 #include <cairo.h>
-#include <drm_fourcc.h>
-#include <pango/pangocairo.h>
 #include <wlr/util/log.h>
 #include <wlr/util/box.h>
-#include "buffer.h"
 #include "common/array.h"
 #include "common/buf.h"
 #include "common/font.h"
-#include "common/graphic-helpers.h"
+#include "common/lab-scene-rect.h"
+#include "common/macros.h"
+#include "common/scaled-font-buffer.h"
+#include "common/scaled-icon-buffer.h"
 #include "common/scene-helpers.h"
+#include "common/string-helpers.h"
 #include "config/rcxml.h"
 #include "labwc.h"
 #include "node.h"
@@ -21,13 +21,23 @@
 #include "window-rules.h"
 #include "workspaces.h"
 
+struct osd_scene_item {
+	struct view *view;
+	struct wlr_scene_node *highlight_outline;
+};
+
+static void update_osd(struct server *server);
+
 static void
-destroy_osd_nodes(struct output *output)
+destroy_osd_scenes(struct server *server)
 {
-	struct wlr_scene_node *child, *next;
-	struct wl_list *children = &output->osd_tree->children;
-	wl_list_for_each_safe(child, next, children, link) {
-		wlr_scene_node_destroy(child);
+	struct output *output;
+	wl_list_for_each(output, &server->outputs, link) {
+		wlr_scene_node_destroy(&output->osd_scene.tree->node);
+		output->osd_scene.tree = NULL;
+
+		wl_array_release(&output->osd_scene.items);
+		wl_array_init(&output->osd_scene.items);
 	}
 }
 
@@ -36,21 +46,25 @@ osd_update_preview_outlines(struct view *view)
 {
 	/* Create / Update preview outline tree */
 	struct server *server = view->server;
-	struct multi_rect *rect = view->server->osd_state.preview_outline;
+	struct theme *theme = server->theme;
+	struct lab_scene_rect *rect = view->server->osd_state.preview_outline;
 	if (!rect) {
-		int line_width = server->theme->osd_window_switcher_preview_border_width;
-		float *colors[] = {
-			server->theme->osd_window_switcher_preview_border_color[0],
-			server->theme->osd_window_switcher_preview_border_color[1],
-			server->theme->osd_window_switcher_preview_border_color[2],
+		struct lab_scene_rect_options opts = {
+			.border_colors = (float *[3]) {
+				theme->osd_window_switcher_preview_border_color[0],
+				theme->osd_window_switcher_preview_border_color[1],
+				theme->osd_window_switcher_preview_border_color[2],
+			},
+			.nr_borders = 3,
+			.border_width = theme->osd_window_switcher_preview_border_width,
 		};
-		rect = multi_rect_create(&server->scene->tree, colors, line_width);
+		rect = lab_scene_rect_create(&server->scene->tree, &opts);
 		wlr_scene_node_place_above(&rect->tree->node, &server->menu_tree->node);
 		server->osd_state.preview_outline = rect;
 	}
 
 	struct wlr_box geo = ssd_max_extents(view);
-	multi_rect_set_size(rect, geo.width, geo.height);
+	lab_scene_rect_set_size(rect, geo.width, geo.height);
 	wlr_scene_node_set_position(&rect->tree->node, geo.x, geo.y);
 }
 
@@ -118,8 +132,9 @@ osd_on_view_destroy(struct view *view)
 	}
 
 	if (osd_state->cycle_view) {
-		/* Update the OSD to reflect the view has now gone. */
-		osd_update(view->server);
+		/* Recreate the OSD to reflect the view has now gone. */
+		destroy_osd_scenes(view->server);
+		update_osd(view->server);
 	}
 
 	if (view->scene_tree) {
@@ -172,7 +187,10 @@ osd_begin(struct server *server, enum lab_cycle_dir direction)
 
 	seat_focus_override_begin(&server->seat,
 		LAB_INPUT_STATE_WINDOW_SWITCHER, LAB_CURSOR_DEFAULT);
-	osd_update(server);
+	update_osd(server);
+
+	/* Update cursor, in case it is within the area covered by OSD */
+	cursor_update_focus(server);
 }
 
 void
@@ -182,7 +200,7 @@ osd_cycle(struct server *server, enum lab_cycle_dir direction)
 
 	server->osd_state.cycle_view = get_next_cycle_view(server,
 		server->osd_state.cycle_view, direction);
-	osd_update(server);
+	update_osd(server);
 }
 
 void
@@ -195,11 +213,8 @@ osd_finish(struct server *server)
 	server->osd_state.preview_anchor = NULL;
 	server->osd_state.cycle_view = NULL;
 
-	struct output *output;
-	wl_list_for_each(output, &server->outputs, link) {
-		destroy_osd_nodes(output);
-		wlr_scene_node_set_enabled(&output->osd_tree->node, false);
-	}
+	destroy_osd_scenes(server);
+
 	if (server->osd_state.preview_outline) {
 		/* Destroy the whole multi_rect so we can easily react to new themes */
 		wlr_scene_node_destroy(&server->osd_state.preview_outline->tree->node);
@@ -252,68 +267,86 @@ preview_cycled_view(struct view *view)
 }
 
 static void
-render_osd(struct server *server, cairo_t *cairo, int w, int h,
-		bool show_workspace, const char *workspace_name,
-		struct wl_array *views)
+create_osd_scene(struct output *output, struct wl_array *views)
 {
-	struct view *cycle_view = server->osd_state.cycle_view;
+	struct server *server = output->server;
 	struct theme *theme = server->theme;
+	bool show_workspace = wl_list_length(&rc.workspace_config.workspaces) > 1;
+	const char *workspace_name = server->workspaces.current->name;
 
-	cairo_surface_t *surf = cairo_get_target(cairo);
+	int w = theme->osd_window_switcher_width;
+	if (theme->osd_window_switcher_width_is_percent) {
+		w = output->wlr_output->width
+			* theme->osd_window_switcher_width / 100;
+	}
+	int h = wl_array_len(views) * rc.theme->osd_window_switcher_item_height
+		+ 2 * rc.theme->osd_border_width
+		+ 2 * rc.theme->osd_window_switcher_padding;
+	if (show_workspace) {
+		/* workspace indicator */
+		h += theme->osd_window_switcher_item_height;
+	}
+
+	output->osd_scene.tree = wlr_scene_tree_create(output->osd_tree);
+
+	float *text_color = theme->osd_label_text_color;
+	float *bg_color = theme->osd_bg_color;
 
 	/* Draw background */
-	set_cairo_color(cairo, theme->osd_bg_color);
-	cairo_rectangle(cairo, 0, 0, w, h);
-	cairo_fill(cairo);
-
-	/* Draw border */
-	set_cairo_color(cairo, theme->osd_border_color);
-	struct wlr_fbox fbox = {
+	struct lab_scene_rect_options bg_opts = {
+		.border_colors = (float *[1]) {theme->osd_border_color},
+		.nr_borders = 1,
+		.border_width = theme->osd_border_width,
+		.bg_color = bg_color,
 		.width = w,
 		.height = h,
 	};
-	draw_cairo_border(cairo, fbox, theme->osd_border_width);
-
-	/* Set up text rendering */
-	set_cairo_color(cairo, theme->osd_label_text_color);
-	PangoLayout *layout = pango_cairo_create_layout(cairo);
-	pango_context_set_round_glyph_positions(pango_layout_get_context(layout), false);
-	pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
-
-	PangoFontDescription *desc = font_to_pango_desc(&rc.font_osd);
-	pango_layout_set_font_description(layout, desc);
-
-	pango_cairo_update_layout(cairo, layout);
+	lab_scene_rect_create(output->osd_scene.tree, &bg_opts);
 
 	int y = theme->osd_border_width + theme->osd_window_switcher_padding;
 
 	/* Draw workspace indicator */
 	if (show_workspace) {
+		struct font font = rc.font_osd;
+		font.weight = PANGO_WEIGHT_BOLD;
+
 		/* Center workspace indicator on the x axis */
-		int x = font_width(&rc.font_osd, workspace_name);
-		x = (w - x) / 2;
-		cairo_move_to(cairo, x, y + theme->osd_window_switcher_item_active_border_width);
-		PangoWeight weight = pango_font_description_get_weight(desc);
-		pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
-		pango_layout_set_font_description(layout, desc);
-		pango_layout_set_text(layout, workspace_name, -1);
-		pango_cairo_show_layout(cairo, layout);
-		pango_font_description_set_weight(desc, weight);
-		pango_layout_set_font_description(layout, desc);
+		int x = (w - font_width(&font, workspace_name)) / 2;
+		if (x < 0) {
+			wlr_log(WLR_ERROR,
+				"not enough space for workspace name in osd");
+			goto error;
+		}
+
+		struct scaled_font_buffer *font_buffer =
+			scaled_font_buffer_create(output->osd_scene.tree);
+		wlr_scene_node_set_position(&font_buffer->scene_buffer->node,
+			x, y + (theme->osd_window_switcher_item_height
+				- font_height(&font)) / 2);
+		scaled_font_buffer_update(font_buffer, workspace_name, 0,
+			&font, text_color, bg_color);
 		y += theme->osd_window_switcher_item_height;
 	}
-	pango_font_description_free(desc);
 
 	struct buf buf = BUF_INIT;
+	int nr_fields = wl_list_length(&rc.window_switcher.fields);
 
 	/* This is the width of the area available for text fields */
-	int available_width = w - 2 * theme->osd_border_width
+	int field_widths_sum = w - 2 * theme->osd_border_width
 		- 2 * theme->osd_window_switcher_padding
-		- 2 * theme->osd_window_switcher_item_active_border_width;
+		- 2 * theme->osd_window_switcher_item_active_border_width
+		- (nr_fields + 1) * theme->osd_window_switcher_item_padding_x;
+	if (field_widths_sum <= 0) {
+		wlr_log(WLR_ERROR, "Not enough spaces for osd contents");
+		goto error;
+	}
 
 	/* Draw text for each node */
 	struct view **view;
 	wl_array_for_each(view, views) {
+		struct osd_scene_item *item =
+			wl_array_add(&output->osd_scene.items, sizeof(*item));
+		item->view = *view;
 		/*
 		 *    OSD border
 		 * +---------------------------------+
@@ -334,104 +367,91 @@ render_osd(struct server *server, cairo_t *cairo, int w, int h,
 			+ theme->osd_window_switcher_padding
 			+ theme->osd_window_switcher_item_active_border_width
 			+ theme->osd_window_switcher_item_padding_x;
+		struct wlr_scene_tree *item_root =
+			wlr_scene_tree_create(output->osd_scene.tree);
 
-		int nr_fields = wl_list_length(&rc.window_switcher.fields);
 		struct window_switcher_field *field;
 		wl_list_for_each(field, &rc.window_switcher.fields, link) {
-			buf_clear(&buf);
-			cairo_move_to(cairo, x, y
-				+ theme->osd_window_switcher_item_padding_y
-				+ theme->osd_window_switcher_item_active_border_width);
+			int field_width = field_widths_sum * field->width / 100.0;
+			struct wlr_scene_node *node = NULL;
+			int height = -1;
 
-			osd_field_get_content(field, &buf, *view);
+			if (field->content == LAB_FIELD_ICON) {
+				int icon_size = MIN(field_width,
+					theme->osd_window_switcher_item_icon_size);
+				struct scaled_icon_buffer *icon_buffer =
+					scaled_icon_buffer_create(item_root,
+						server, icon_size, icon_size);
+				scaled_icon_buffer_set_view(icon_buffer, *view);
+				node = &icon_buffer->scene_buffer->node;
+				height = icon_size;
+			} else {
+				buf_clear(&buf);
+				osd_field_get_content(field, &buf, *view);
 
-			int field_width = (available_width - (nr_fields + 1)
-				* theme->osd_window_switcher_item_padding_x)
-				* field->width / 100.0;
-			pango_layout_set_width(layout, field_width * PANGO_SCALE);
-			pango_layout_set_text(layout, buf.data, -1);
-			pango_cairo_show_layout(cairo, layout);
+				if (!string_null_or_empty(buf.data)) {
+					struct scaled_font_buffer *font_buffer =
+						scaled_font_buffer_create(item_root);
+					scaled_font_buffer_update(font_buffer,
+						buf.data, field_width,
+						&rc.font_osd, text_color, bg_color);
+					node = &font_buffer->scene_buffer->node;
+					height = font_height(&rc.font_osd);
+				}
+			}
+
+			if (node) {
+				int item_height =
+					theme->osd_window_switcher_item_height;
+				wlr_scene_node_set_position(node,
+					x, y + (item_height - height) / 2);
+			}
 			x += field_width + theme->osd_window_switcher_item_padding_x;
 		}
 
-		if (*view == cycle_view) {
-			/* Highlight current window */
-			struct wlr_fbox fbox = {
-				.x = theme->osd_border_width + theme->osd_window_switcher_padding,
-				.y = y,
-				.width = w
-					- 2 * theme->osd_border_width
-					- 2 * theme->osd_window_switcher_padding,
-				.height = theme->osd_window_switcher_item_height,
-			};
-			draw_cairo_border(cairo, fbox,
-				theme->osd_window_switcher_item_active_border_width);
-			cairo_stroke(cairo);
-		}
+		/* Highlight around selected window's item */
+		int highlight_x = theme->osd_border_width
+				+ theme->osd_window_switcher_padding;
+		struct lab_scene_rect_options highlight_opts = {
+			.border_colors = (float *[1]) {text_color},
+			.nr_borders = 1,
+			.border_width =
+				theme->osd_window_switcher_item_active_border_width,
+			.width = w - 2 * theme->osd_border_width
+				- 2 * theme->osd_window_switcher_padding,
+			.height = theme->osd_window_switcher_item_height,
+		};
+
+		struct lab_scene_rect *highlight_rect = lab_scene_rect_create(
+			output->osd_scene.tree, &highlight_opts);
+		item->highlight_outline = &highlight_rect->tree->node;
+		wlr_scene_node_set_position(item->highlight_outline, highlight_x, y);
+		wlr_scene_node_set_enabled(item->highlight_outline, false);
 
 		y += theme->osd_window_switcher_item_height;
 	}
 	buf_reset(&buf);
-	g_object_unref(layout);
 
-	cairo_surface_flush(surf);
+error:;
+	/* Center OSD */
+	struct wlr_box usable = output_usable_area_in_layout_coords(output);
+	wlr_scene_node_set_position(&output->osd_scene.tree->node,
+		usable.x + usable.width / 2 - w / 2,
+		usable.y + usable.height / 2 - h / 2);
 }
 
 static void
-display_osd(struct output *output, struct wl_array *views)
+update_item_highlight(struct output *output)
 {
-	struct server *server = output->server;
-	struct theme *theme = server->theme;
-	bool show_workspace = wl_list_length(&rc.workspace_config.workspaces) > 1;
-	const char *workspace_name = server->workspaces.current->name;
-
-	float scale = output->wlr_output->scale;
-	int w = theme->osd_window_switcher_width;
-	if (theme->osd_window_switcher_width_is_percent) {
-		w = output->wlr_output->width / output->wlr_output->scale
-			* theme->osd_window_switcher_width / 100;
+	struct osd_scene_item *item;
+	wl_array_for_each(item, &output->osd_scene.items) {
+		wlr_scene_node_set_enabled(item->highlight_outline,
+			item->view == output->server->osd_state.cycle_view);
 	}
-	int h = wl_array_len(views) * rc.theme->osd_window_switcher_item_height
-		+ 2 * rc.theme->osd_border_width
-		+ 2 * rc.theme->osd_window_switcher_padding;
-	if (show_workspace) {
-		/* workspace indicator */
-		h += theme->osd_window_switcher_item_height;
-	}
-
-	struct lab_data_buffer *buffer = buffer_create_cairo(w, h, scale);
-	if (!buffer) {
-		wlr_log(WLR_ERROR, "Failed to allocate cairo buffer for the window switcher");
-		return;
-	}
-
-	/* Render OSD image */
-	cairo_t *cairo = cairo_create(buffer->surface);
-	render_osd(server, cairo, w, h, show_workspace, workspace_name, views);
-	cairo_destroy(cairo);
-
-	struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_create(
-		output->osd_tree, &buffer->base);
-	wlr_buffer_drop(&buffer->base);
-	wlr_scene_buffer_set_dest_size(scene_buffer, w, h);
-
-	/* Center OSD */
-	struct wlr_box output_box;
-	wlr_output_layout_get_box(output->server->output_layout,
-		output->wlr_output, &output_box);
-	int lx = output->usable_area.x + output->usable_area.width / 2
-		- w / 2 + output_box.x;
-	int ly = output->usable_area.y + output->usable_area.height / 2
-		- h / 2 + output_box.y;
-	wlr_scene_node_set_position(&scene_buffer->node, lx, ly);
-	wlr_scene_node_set_enabled(&output->osd_tree->node, true);
-
-	/* Update cursor, in case it is within the area covered by OSD */
-	cursor_update_focus(server);
 }
 
-void
-osd_update(struct server *server)
+static void
+update_osd(struct server *server)
 {
 	struct wl_array views;
 	wl_array_init(&views);
@@ -446,10 +466,14 @@ osd_update(struct server *server)
 		/* Display the actual OSD */
 		struct output *output;
 		wl_list_for_each(output, &server->outputs, link) {
-			destroy_osd_nodes(output);
-			if (output_is_usable(output)) {
-				display_osd(output, &views);
+			if (!output_is_usable(output)) {
+				continue;
 			}
+			if (!output->osd_scene.tree) {
+				create_osd_scene(output, &views);
+				assert(output->osd_scene.tree);
+			}
+			update_item_highlight(output);
 		}
 	}
 

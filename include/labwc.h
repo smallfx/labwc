@@ -22,7 +22,6 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard_group.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
-#include <wlr/types/wlr_matrix.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_output_power_management_v1.h>
@@ -89,7 +88,7 @@ struct keyboard {
 	struct input base;
 	struct wlr_keyboard *wlr_keyboard;
 	bool is_virtual;
-	struct wl_listener modifier;
+	struct wl_listener modifiers;
 	struct wl_listener key;
 	/* key repeat for compositor keybinds */
 	uint32_t keybind_repeat_keycode;
@@ -116,6 +115,7 @@ struct seat {
 	struct {
 		double x, y;
 	} smooth_scroll_offset;
+	bool cursor_scroll_wheel_emulation;
 
 	/*
 	 * The surface whose keyboard focus is temporarily cleared with
@@ -178,11 +178,13 @@ struct seat {
 	struct wl_listener new_input;
 	struct wl_listener focus_change;
 
-	struct wl_listener cursor_motion;
-	struct wl_listener cursor_motion_absolute;
-	struct wl_listener cursor_button;
-	struct wl_listener cursor_axis;
-	struct wl_listener cursor_frame;
+	struct {
+		struct wl_listener motion;
+		struct wl_listener motion_absolute;
+		struct wl_listener button;
+		struct wl_listener axis;
+		struct wl_listener frame;
+	} on_cursor;
 
 	struct wlr_pointer_gestures_v1 *pointer_gestures;
 	struct wl_listener pinch_begin;
@@ -194,7 +196,7 @@ struct seat {
 	struct wl_listener hold_begin;
 	struct wl_listener hold_end;
 
-	struct wl_listener request_cursor;
+	struct wl_listener request_set_cursor;
 	struct wl_listener request_set_shape;
 	struct wl_listener request_set_selection;
 	struct wl_listener request_set_primary_selection;
@@ -220,7 +222,7 @@ struct seat {
 	struct wl_listener virtual_pointer_new;
 
 	struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard;
-	struct wl_listener virtual_keyboard_new;
+	struct wl_listener new_virtual_keyboard;
 };
 
 struct lab_data_buffer;
@@ -243,6 +245,12 @@ struct server {
 	} headless;
 	struct wlr_session *session;
 	struct wlr_linux_dmabuf_v1 *linux_dmabuf;
+	struct wlr_compositor *compositor;
+
+	struct wl_event_source *sighup_source;
+	struct wl_event_source *sigint_source;
+	struct wl_event_source *sigterm_source;
+	struct wl_event_source *sigchld_source;
 
 	struct wlr_xdg_shell *xdg_shell;
 	struct wlr_layer_shell_v1 *layer_shell;
@@ -262,6 +270,9 @@ struct server {
 	struct wlr_xdg_activation_v1 *xdg_activation;
 	struct wl_listener xdg_activation_request;
 	struct wl_listener xdg_activation_new_token;
+
+	struct wlr_xdg_toplevel_icon_manager_v1 *xdg_toplevel_icon_manager;
+	struct wl_listener xdg_toplevel_icon_set_icon;
 
 	struct wl_list views;
 	struct wl_list unmanaged_surfaces;
@@ -293,11 +304,6 @@ struct server {
 	 * Note that active_view is synced with foreign-toplevel clients.
 	 */
 	struct view *active_view;
-	/*
-	 * Most recently raised view. Used to avoid unnecessarily
-	 * raising the same view over and over.
-	 */
-	struct view *last_raised_view;
 
 	struct ssd_hover_state *ssd_hover_state;
 
@@ -387,7 +393,7 @@ struct server {
 		struct wlr_scene_node *preview_node;
 		struct wlr_scene_tree *preview_parent;
 		struct wlr_scene_node *preview_anchor;
-		struct multi_rect *preview_outline;
+		struct lab_scene_rect *preview_outline;
 	} osd_state;
 
 	struct theme *theme;
@@ -413,6 +419,12 @@ struct output {
 	struct wlr_scene_tree *osd_tree;
 	struct wlr_scene_tree *session_lock_tree;
 	struct wlr_scene_buffer *workspace_osd;
+
+	struct osd_scene {
+		struct wl_array items; /* struct osd_scene_item */
+		struct wlr_scene_tree *tree;
+	} osd_scene;
+
 	/* In output-relative scene coordinates */
 	struct wlr_box usable_area;
 
@@ -425,7 +437,6 @@ struct output {
 	struct wl_listener frame;
 	struct wl_listener request_state;
 
-	bool leased;
 	bool gamma_lut_changed;
 };
 
@@ -439,6 +450,7 @@ struct constraint {
 
 void xdg_popup_create(struct view *view, struct wlr_xdg_popup *wlr_popup);
 void xdg_shell_init(struct server *server);
+void xdg_shell_finish(struct server *server);
 
 /*
  * desktop.c routines deal with a collection of views
@@ -481,7 +493,7 @@ struct view *desktop_topmost_focusable_view(struct server *server);
  * Toggles the (output local) visibility of the layershell top layer
  * based on the existence of a fullscreen window on the current workspace.
  */
-void desktop_update_top_layer_visiblity(struct server *server);
+void desktop_update_top_layer_visibility(struct server *server);
 
 /**
  * desktop_focus_topmost_view() - focus the topmost view on the current
@@ -543,6 +555,7 @@ void interactive_cancel(struct view *view);
 enum view_edge edge_from_cursor(struct seat *seat, struct output **dest_output);
 
 void output_init(struct server *server);
+void output_finish(struct server *server);
 void output_manager_init(struct server *server);
 struct output *output_from_wlr_output(struct server *server,
 	struct wlr_output *wlr_output);
@@ -580,7 +593,7 @@ void output_enable_adaptive_sync(struct output *output, bool enabled);
  */
 float output_max_scale(struct server *server);
 
-void new_tearing_hint(struct wl_listener *listener, void *data);
+void handle_tearing_new_object(struct wl_listener *listener, void *data);
 
 void server_init(struct server *server);
 void server_start(struct server *server);

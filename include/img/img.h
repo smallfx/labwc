@@ -7,8 +7,6 @@
 #include <stdint.h>
 #include <wayland-util.h>
 
-struct lab_img_cache;
-
 enum lab_img_type {
 	LAB_IMG_PNG,
 	LAB_IMG_SVG,
@@ -18,7 +16,7 @@ enum lab_img_type {
 
 struct lab_img {
 	struct wl_array modifiers; /* lab_img_modifier_func_t */
-	struct lab_img_cache *cache;
+	struct lab_img_data *data;
 };
 
 struct lab_img *lab_img_load(enum lab_img_type type, const char *path,
@@ -61,11 +59,10 @@ void lab_img_add_modifier(struct lab_img *img, lab_img_modifier_func_t modifier)
  * @img: source image
  * @width: width of the created buffer
  * @height: height of the created buffer
- * @padding_x: horizontal padding around the rendered image in the buffer
  * @scale: scale of the created buffer
  */
 struct lab_data_buffer *lab_img_render(struct lab_img *img,
-	int width, int height, int padding_x, double scale);
+	int width, int height, double scale);
 
 /**
  * lab_img_destroy() - destroy lab_img

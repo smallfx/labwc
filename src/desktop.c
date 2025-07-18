@@ -39,6 +39,25 @@ desktop_arrange_all_views(struct server *server)
 	}
 }
 
+static void
+set_or_offer_focus(struct view *view)
+{
+	struct seat *seat = &view->server->seat;
+	switch (view_wants_focus(view)) {
+	case VIEW_WANTS_FOCUS_ALWAYS:
+		if (view->surface != seat->seat->keyboard_state.focused_surface) {
+			seat_focus_surface(seat, view->surface);
+		}
+		break;
+	case VIEW_WANTS_FOCUS_LIKELY:
+	case VIEW_WANTS_FOCUS_UNLIKELY:
+		view_offer_focus(view);
+		break;
+	case VIEW_WANTS_FOCUS_NEVER:
+		break;
+	}
+}
+
 void
 desktop_focus_view(struct view *view, bool raise)
 {
@@ -48,6 +67,11 @@ desktop_focus_view(struct view *view, bool raise)
 	 * 'request_activate' and 'request_minimize'.
 	 */
 	if (!view->surface) {
+		return;
+	}
+
+	if (view->server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
+		wlr_log(WLR_DEBUG, "not focusing window while window switching");
 		return;
 	}
 
@@ -72,21 +96,17 @@ desktop_focus_view(struct view *view, bool raise)
 		workspaces_switch_to(view->workspace, /*update_focus*/ false);
 	}
 
-	/*
-	 * Give input focus, even if the view claims not to want it (see
-	 * view->impl->wants_focus). This is a workaround for so-called
-	 * "globally active" X11 views (MATLAB known to be one such)
-	 * that expect to be able to control focus themselves, but can't
-	 * under labwc since it's disallowed at the wlroots level.
-	 */
-	struct seat *seat = &view->server->seat;
-	if (view->surface != seat->seat->keyboard_state.focused_surface) {
-		seat_focus_surface(seat, view->surface);
-	}
-
 	if (raise) {
 		view_move_to_front(view);
 	}
+
+	/*
+	 * If any child/sibling of the view is a modal dialog, focus
+	 * the dialog instead. It does not need to be raised separately
+	 * since view_move_to_front() raises all sibling views together.
+	 */
+	struct view *dialog = view_get_modal_dialog(view);
+	set_or_offer_focus(dialog ? dialog : view);
 }
 
 /* TODO: focus layer-shell surfaces also? */
@@ -101,7 +121,7 @@ desktop_focus_view_or_surface(struct seat *seat, struct view *view,
 	} else {
 		struct wlr_xwayland_surface *xsurface =
 			wlr_xwayland_surface_try_from_wlr_surface(surface);
-		if (xsurface && wlr_xwayland_or_surface_wants_focus(xsurface)) {
+		if (xsurface && wlr_xwayland_surface_override_redirect_wants_focus(xsurface)) {
 			seat_focus_surface(seat, surface);
 		}
 #endif
@@ -184,7 +204,7 @@ desktop_focus_output(struct output *output)
 }
 
 void
-desktop_update_top_layer_visiblity(struct server *server)
+desktop_update_top_layer_visibility(struct server *server)
 {
 	struct view *view;
 	struct output *output;
@@ -278,7 +298,8 @@ get_cursor_context(struct server *server)
 			case LAB_NODE_DESC_VIEW:
 			case LAB_NODE_DESC_XDG_POPUP:
 				ret.view = desc->data;
-				ret.type = ssd_get_part_type(ret.view->ssd, ret.node);
+				ret.type = ssd_get_part_type(
+					ret.view->ssd, ret.node, cursor);
 				if (ret.type == LAB_SSD_CLIENT) {
 					ret.surface = lab_wlr_surface_from_node(ret.node);
 				}

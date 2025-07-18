@@ -66,7 +66,7 @@ xdg_deco_request_mode(struct wl_listener *listener, void *data)
 	}
 
 	/*
-	 * We may get multiple request_mode calls in an unitialized state.
+	 * We may get multiple request_mode calls in an uninitialized state.
 	 * Just update the last requested mode and only add the commit
 	 * handler on the first uninitialized state call.
 	 */
@@ -126,4 +126,10 @@ xdg_server_decoration_init(struct server *server)
 	wl_signal_add(&xdg_deco_mgr->events.new_toplevel_decoration,
 		&server->xdg_toplevel_decoration);
 	server->xdg_toplevel_decoration.notify = xdg_toplevel_decoration;
+}
+
+void
+xdg_server_decoration_finish(struct server *server)
+{
+	wl_list_remove(&server->xdg_toplevel_decoration.link);
 }

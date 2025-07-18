@@ -101,11 +101,11 @@ _osd_update(struct server *server)
 
 		/* Border */
 		set_cairo_color(cairo, theme->osd_border_color);
-		struct wlr_fbox fbox = {
+		struct wlr_fbox border_fbox = {
 			.width = width,
 			.height = height,
 		};
-		draw_cairo_border(cairo, fbox, theme->osd_border_width);
+		draw_cairo_border(cairo, border_fbox, theme->osd_border_width);
 
 		/* Boxes */
 		uint16_t x;
@@ -114,12 +114,17 @@ _osd_update(struct server *server)
 			wl_list_for_each(workspace, &server->workspaces.all, link) {
 				bool active =  workspace == server->workspaces.current;
 				set_cairo_color(cairo, server->theme->osd_label_text_color);
-				cairo_rectangle(cairo, x, margin,
-					rect_width - padding, rect_height);
-				cairo_stroke(cairo);
+				struct wlr_fbox fbox = {
+					.x = x,
+					.y = margin,
+					.width = rect_width,
+					.height = rect_height,
+				};
+				draw_cairo_border(cairo, fbox,
+					theme->osd_workspace_switcher_boxes_border_width);
 				if (active) {
 					cairo_rectangle(cairo, x, margin,
-						rect_width - padding, rect_height);
+						rect_width, rect_height);
 					cairo_fill(cairo);
 				}
 				x += rect_width + padding;
@@ -264,6 +269,75 @@ get_next(struct workspace *current, struct wl_list *workspaces, bool wrap)
 	return wl_container_of(target_link, current, link);
 }
 
+static bool
+workspace_has_views(struct workspace *workspace, struct server *server)
+{
+	struct view *view;
+
+	for_each_view(view, &server->views, LAB_VIEW_CRITERIA_NO_OMNIPRESENT) {
+		if (view->workspace == workspace) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static struct workspace *
+get_adjacent_occupied(struct workspace *current, struct wl_list *workspaces,
+		bool wrap, bool reverse)
+{
+	struct server *server = current->server;
+	struct wl_list *start = &current->link;
+	struct wl_list *link = reverse ? start->prev : start->next;
+	bool has_wrapped = false;
+
+	while (true) {
+		/* Handle list boundaries */
+		if (link == workspaces) {
+			if (!wrap) {
+				break;  /* No wrapping allowed - stop searching */
+			}
+			if (has_wrapped) {
+				break;  /* Already wrapped once - stop to prevent infinite loop */
+			}
+			/* Wrap around */
+			link = reverse ? workspaces->prev : workspaces->next;
+			has_wrapped = true;
+			continue;
+		}
+
+		/* Get the workspace */
+		struct workspace *target = wl_container_of(link, target, link);
+
+		/* Check if we've come full circle */
+		if (link == start) {
+			break;
+		}
+
+		/* Check if it's occupied (and not current) */
+		if (target != current && workspace_has_views(target, server)) {
+			return target;
+		}
+
+		/* Move to next/prev */
+		link = reverse ? link->prev : link->next;
+	}
+
+	return NULL;  /* No occupied workspace found */
+}
+
+static struct workspace *
+get_prev_occupied(struct workspace *current, struct wl_list *workspaces, bool wrap)
+{
+	return get_adjacent_occupied(current, workspaces, wrap, true);
+}
+
+static struct workspace *
+get_next_occupied(struct workspace *current, struct wl_list *workspaces, bool wrap)
+{
+	return get_adjacent_occupied(current, workspaces, wrap, false);
+}
+
 static int
 _osd_handle_timeout(void *data)
 {
@@ -287,8 +361,7 @@ _osd_show(struct server *server)
 			wlr_scene_node_set_enabled(&output->workspace_osd->node, true);
 		}
 	}
-	struct wlr_keyboard *keyboard = &server->seat.keyboard_group->keyboard;
-	if (keyboard_any_modifiers_pressed(keyboard)) {
+	if (keyboard_get_all_modifiers(&server->seat)) {
 		/* Hidden by release of all modifiers */
 		server->seat.workspace_osd_shown_by_modifier = true;
 	} else {
@@ -370,6 +443,11 @@ workspaces_switch_to(struct workspace *target, bool update_focus)
 	/* Make sure new views will spawn on the new workspace */
 	server->workspaces.current = target;
 
+	struct view *grabbed_view = server->grabbed_view;
+	if (grabbed_view && !view_is_always_on_top(grabbed_view)) {
+		view_move_to_workspace(grabbed_view, target);
+	}
+
 	/*
 	 * Make sure we are focusing what the user sees. Only refocus if
 	 * the focus is not already on an omnipresent or always-on-top view.
@@ -381,9 +459,9 @@ workspaces_switch_to(struct workspace *target, bool update_focus)
 	 *       below that should take care of the issue.
 	 */
 	if (update_focus) {
-		struct view *view = server->active_view;
-		if (!view || (!view->visible_on_all_workspaces
-				&& !view_is_always_on_top(view))) {
+		struct view *active_view = server->active_view;
+		if (!active_view || (!active_view->visible_on_all_workspaces
+				&& !view_is_always_on_top(active_view))) {
 			desktop_focus_topmost_view(server);
 		}
 	}
@@ -391,10 +469,6 @@ workspaces_switch_to(struct workspace *target, bool update_focus)
 	/* And finally show the OSD */
 	_osd_show(server);
 
-#if HAVE_XWAYLAND
-	/* Ensure xwayland internal stacking order corresponds to the current workspace  */
-	xwayland_adjust_stacking_order(server);
-#endif
 	/*
 	 * Make sure we are not carrying around a
 	 * cursor image from the previous desktop
@@ -402,7 +476,7 @@ workspaces_switch_to(struct workspace *target, bool update_focus)
 	cursor_update_focus(server);
 
 	/* Ensure that only currently visible fullscreen windows hide the top layer */
-	desktop_update_top_layer_visiblity(server);
+	desktop_update_top_layer_visibility(server);
 
 	lab_cosmic_workspace_set_active(target->cosmic_workspace, true);
 	lab_ext_workspace_set_active(target->ext_workspace, true);
@@ -453,6 +527,10 @@ workspaces_find(struct workspace *anchor, const char *name, bool wrap)
 		return get_prev(anchor, workspaces, wrap);
 	} else if (!strcasecmp(name, "right")) {
 		return get_next(anchor, workspaces, wrap);
+	} else if (!strcasecmp(name, "left-occupied")) {
+		return get_prev_occupied(anchor, workspaces, wrap);
+	} else if (!strcasecmp(name, "right-occupied")) {
+		return get_next_occupied(anchor, workspaces, wrap);
 	} else {
 		wl_list_for_each(target, workspaces, link) {
 			if (!strcasecmp(target->name, name)) {
@@ -470,6 +548,8 @@ destroy_workspace(struct workspace *workspace)
 	wlr_scene_node_destroy(&workspace->tree->node);
 	zfree(workspace->name);
 	wl_list_remove(&workspace->link);
+	wl_list_remove(&workspace->on_cosmic.activate.link);
+	wl_list_remove(&workspace->on_ext.activate.link);
 
 	lab_cosmic_workspace_destroy(workspace->cosmic_workspace);
 	lab_ext_workspace_destroy(workspace->ext_workspace);

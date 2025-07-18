@@ -35,6 +35,20 @@ touch_get_coords(struct seat *seat, struct wlr_touch *touch, double x, double y,
 		return NULL;
 	}
 
+	/*
+	 * Do not return a surface when a labwc menu is still open.
+	 * The idea is: when a client supports touch, but a labwc root or
+	 * client menu is open, use mouse emulation for the first touch
+	 * interaction. Mouse emulation for this first touch then runs through
+	 * the normal cursor logic which closes the menu. All touch interaction
+	 * after that do use the touch protocol because the menu is now closed.
+	 * This matches normal pointer/mouse behavior where the first click on
+	 * a surface closes a root/client menu.
+	 */
+	if (seat->server->input_mode == LAB_INPUT_STATE_MENU) {
+		return NULL;
+	}
+
 	/* Convert coordinates: first [0, 1] => layout, then layout => surface */
 	double lx, ly;
 	wlr_cursor_absolute_to_layout_coords(seat->cursor, &touch->base,
@@ -50,7 +64,7 @@ touch_get_coords(struct seat *seat, struct wlr_touch *touch, double x, double y,
 	/* Find the surface and return it if it accepts touch events */
 	struct wlr_surface *surface = lab_wlr_surface_from_node(node);
 
-	if (surface && !wlr_surface_accepts_touch(seat->seat, surface)) {
+	if (surface && !wlr_surface_accepts_touch(surface, seat->seat)) {
 		surface = NULL;
 	}
 	return surface;
@@ -186,6 +200,7 @@ handle_touch_up(struct wl_listener *listener, void *data)
 			} else {
 				cursor_emulate_button(seat, BTN_LEFT,
 					WL_POINTER_BUTTON_STATE_RELEASED, event->time_msec);
+				ssd_update_button_hover(NULL, seat->server->ssd_hover_state);
 			}
 			wl_list_remove(&touch_point->link);
 			zfree(touch_point);

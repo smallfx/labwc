@@ -4,7 +4,9 @@
 #include <strings.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_security_context_v1.h>
+#include "buffer.h"
 #include "common/box.h"
+#include "common/list.h"
 #include "common/macros.h"
 #include "common/match.h"
 #include "common/mem.h"
@@ -262,6 +264,15 @@ matches_criteria(struct view *view, enum lab_view_criteria criteria)
 			return false;
 		}
 	}
+	if (criteria & LAB_VIEW_CRITERIA_NO_OMNIPRESENT) {
+		/*
+		 * TODO: Once always-on-top views use a per-workspace
+		 *       sub-tree we can remove the check from this condition.
+		 */
+		if (view->visible_on_all_workspaces || view_is_always_on_top(view)) {
+			return false;
+		}
+	}
 	return true;
 }
 
@@ -381,10 +392,23 @@ view_is_focusable(struct view *view)
 	if (!view->surface) {
 		return false;
 	}
-	if (view_wants_focus(view) != VIEW_WANTS_FOCUS_ALWAYS) {
+
+	switch (view_wants_focus(view)) {
+	case VIEW_WANTS_FOCUS_ALWAYS:
+	case VIEW_WANTS_FOCUS_LIKELY:
+		return (view->mapped || view->minimized);
+	default:
 		return false;
 	}
-	return (view->mapped || view->minimized);
+}
+
+void
+view_offer_focus(struct view *view)
+{
+	assert(view);
+	if (view->impl->offer_focus) {
+		view->impl->offer_focus(view);
+	}
 }
 
 /**
@@ -471,7 +495,7 @@ view_discover_output(struct view *view, struct wlr_box *geometry)
 		view->output = output;
 		/* Show fullscreen views above top-layer */
 		if (view->fullscreen) {
-			desktop_update_top_layer_visiblity(view->server);
+			desktop_update_top_layer_visibility(view->server);
 		}
 		return true;
 	}
@@ -528,7 +552,7 @@ view_set_output(struct view *view, struct output *output)
 	view->output = output;
 	/* Show fullscreen views above top-layer */
 	if (view->fullscreen) {
-		desktop_update_top_layer_visiblity(view->server);
+		desktop_update_top_layer_visibility(view->server);
 	}
 }
 
@@ -551,14 +575,14 @@ view_update_outputs(struct view *view)
 	wl_list_for_each(output, &view->server->outputs, link) {
 		if (output_is_usable(output) && wlr_output_layout_intersects(
 				layout, output->wlr_output, &view->current)) {
-			new_outputs |= (1ull << output->scene_output->index);
+			new_outputs |= (1ull << output->scene_output->WLR_PRIVATE.index);
 		}
 	}
 
 	if (new_outputs != view->outputs) {
 		view->outputs = new_outputs;
 		wl_signal_emit_mutable(&view->events.new_outputs, NULL);
-		desktop_update_top_layer_visiblity(view->server);
+		desktop_update_top_layer_visibility(view->server);
 	}
 }
 
@@ -568,7 +592,7 @@ view_on_output(struct view *view, struct output *output)
 	assert(view);
 	assert(output);
 	return output->scene_output
-			&& (view->outputs & (1ull << output->scene_output->index));
+			&& (view->outputs & (1ull << output->scene_output->WLR_PRIVATE.index));
 }
 
 void
@@ -803,6 +827,12 @@ void
 view_minimize(struct view *view, bool minimized)
 {
 	assert(view);
+
+	if (view->server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
+		wlr_log(WLR_ERROR, "not minimizing window while window switching");
+		return;
+	}
+
 	/*
 	 * Minimize the root window first because some xwayland clients send a
 	 * request-unmap to sub-windows at this point (for example gimp and its
@@ -814,7 +844,7 @@ view_minimize(struct view *view, bool minimized)
 
 	/* Enable top-layer when full-screen views are minimized */
 	if (view->fullscreen && view->output) {
-		desktop_update_top_layer_visiblity(view->server);
+		desktop_update_top_layer_visibility(view->server);
 	}
 }
 
@@ -1043,12 +1073,12 @@ view_cascade(struct view *view)
 			 * top-left corner is not covered by other views,
 			 * shift the candidate to bottom-right.
 			 */
-			if (box_contains(&candidate, &other)
+			if (wlr_box_contains_box(&candidate, &other)
 					&& !wlr_box_contains_point(
 						&covered, other.x, other.y)) {
 				candidate.x = other.x + offset_x;
 				candidate.y = other.y + offset_y;
-				if (!box_contains(&usable, &candidate)) {
+				if (!wlr_box_contains_box(&usable, &candidate)) {
 					/*
 					 * If the candidate doesn't fit within
 					 * the usable area, fall back to center
@@ -1332,7 +1362,7 @@ static void
 set_maximized(struct view *view, enum view_axis maximized)
 {
 	if (view->impl->maximize) {
-		view->impl->maximize(view, (maximized == VIEW_AXIS_BOTH));
+		view->impl->maximize(view, maximized);
 	}
 
 	view->maximized = maximized;
@@ -1705,7 +1735,7 @@ set_fullscreen(struct view *view, bool fullscreen)
 
 	/* Show fullscreen views above top-layer */
 	if (view->output) {
-		desktop_update_top_layer_visiblity(view->server);
+		desktop_update_top_layer_visibility(view->server);
 	}
 }
 
@@ -2242,21 +2272,17 @@ for_each_subview(struct view *view, void (*action)(struct view *))
 static void
 move_to_front(struct view *view)
 {
-	if (view->impl->move_to_front) {
-		view->impl->move_to_front(view);
-	}
-	view->server->last_raised_view = view;
+	wl_list_remove(&view->link);
+	wl_list_insert(&view->server->views, &view->link);
+	wlr_scene_node_raise_to_top(&view->scene_tree->node);
 }
 
 static void
 move_to_back(struct view *view)
 {
-	if (view->impl->move_to_back) {
-		view->impl->move_to_back(view);
-	}
-	if (view == view->server->last_raised_view) {
-		view->server->last_raised_view = NULL;
-	}
+	wl_list_remove(&view->link);
+	wl_list_append(&view->server->views, &view->link);
+	wlr_scene_node_lower_to_bottom(&view->scene_tree->node);
 }
 
 /*
@@ -2269,16 +2295,6 @@ void
 view_move_to_front(struct view *view)
 {
 	assert(view);
-	/*
-	 * This function is called often, generally on every mouse
-	 * button press (more often for focus-follows-mouse). Avoid
-	 * unnecessarily raising the same view over and over, or
-	 * attempting to raise a root view above its own sub-view.
-	 */
-	struct view *last = view->server->last_raised_view;
-	if (view == last || (last && view == view_get_root(last))) {
-		return;
-	}
 
 	struct view *root = view_get_root(view);
 	assert(root);
@@ -2291,7 +2307,7 @@ view_move_to_front(struct view *view)
 	}
 
 	cursor_update_focus(view->server);
-	desktop_update_top_layer_visiblity(view->server);
+	desktop_update_top_layer_visibility(view->server);
 }
 
 void
@@ -2305,7 +2321,7 @@ view_move_to_back(struct view *view)
 	move_to_back(root);
 
 	cursor_update_focus(view->server);
-	desktop_update_top_layer_visiblity(view->server);
+	desktop_update_top_layer_visibility(view->server);
 }
 
 struct view *
@@ -2325,6 +2341,36 @@ view_append_children(struct view *view, struct wl_array *children)
 	if (view->impl->append_children) {
 		view->impl->append_children(view, children);
 	}
+}
+
+struct view *
+view_get_modal_dialog(struct view *view)
+{
+	assert(view);
+	if (!view->impl->is_modal_dialog) {
+		return NULL;
+	}
+	/* check view itself first */
+	if (view->impl->is_modal_dialog(view)) {
+		return view;
+	}
+
+	/* check sibling views */
+	struct view *dialog = NULL;
+	struct view *root = view_get_root(view);
+	struct wl_array children;
+	struct view **child;
+
+	wl_array_init(&children);
+	view_append_children(root, &children);
+	wl_array_for_each(child, &children) {
+		if (view->impl->is_modal_dialog(*child)) {
+			dialog = *child;
+			break;
+		}
+	}
+	wl_array_release(&children);
+	return dialog;
 }
 
 bool
@@ -2360,9 +2406,6 @@ void
 view_update_app_id(struct view *view)
 {
 	assert(view);
-	if (view->ssd_enabled) {
-		ssd_update_window_icon(view->ssd);
-	}
 	wl_signal_emit_mutable(&view->events.new_app_id, NULL);
 }
 
@@ -2431,7 +2474,18 @@ static void
 handle_map(struct wl_listener *listener, void *data)
 {
 	struct view *view = wl_container_of(listener, view, mappable.map);
-	view->impl->map(view);
+	if (view->minimized) {
+		/*
+		 * The view->impl functions do not directly support
+		 * mapping a view while minimized. Instead, mark it as
+		 * not minimized, map it, and then minimize it again.
+		 */
+		view->minimized = false;
+		view->impl->map(view);
+		view_minimize(view, true);
+	} else {
+		view->impl->map(view);
+	}
 }
 
 static void
@@ -2474,11 +2528,30 @@ view_set_shade(struct view *view, bool shaded)
 
 	view->shaded = shaded;
 	ssd_enable_shade(view->ssd, view->shaded);
-	wlr_scene_node_set_enabled(view->content_node, !view->shaded);
+	wlr_scene_node_set_enabled(&view->content_tree->node, !view->shaded);
+}
 
-	if (view->impl->shade) {
-		view->impl->shade(view, shaded);
+void
+view_set_icon(struct view *view, const char *icon_name, struct wl_array *buffers)
+{
+	/* Update icon name */
+	zfree(view->icon.name);
+	if (icon_name) {
+		view->icon.name = xstrdup(icon_name);
 	}
+
+	/* Update icon images */
+	struct lab_data_buffer **buffer;
+	wl_array_for_each(buffer, &view->icon.buffers) {
+		wlr_buffer_drop(&(*buffer)->base);
+	}
+	wl_array_release(&view->icon.buffers);
+	wl_array_init(&view->icon.buffers);
+	if (buffers) {
+		wl_array_copy(&view->icon.buffers, buffers);
+	}
+
+	wl_signal_emit_mutable(&view->events.set_icon, NULL);
 }
 
 void
@@ -2508,6 +2581,8 @@ view_init(struct view *view)
 	wl_signal_init(&view->events.minimized);
 	wl_signal_init(&view->events.fullscreened);
 	wl_signal_init(&view->events.activated);
+	wl_signal_init(&view->events.set_icon);
+	wl_signal_init(&view->events.destroy);
 }
 
 void
@@ -2516,6 +2591,7 @@ view_destroy(struct view *view)
 	assert(view);
 	struct server *server = view->server;
 
+	wl_signal_emit_mutable(&view->events.destroy, NULL);
 	snap_constraints_invalidate(view);
 
 	if (view->mappable.connected) {
@@ -2548,10 +2624,6 @@ view_destroy(struct view *view)
 		server->session_lock_manager->last_active_view = NULL;
 	}
 
-	if (server->last_raised_view == view) {
-		server->last_raised_view = NULL;
-	}
-
 	if (server->seat.pressed.view == view) {
 		seat_reset_pressed(&server->seat);
 	}
@@ -2568,6 +2640,8 @@ view_destroy(struct view *view)
 	osd_on_view_destroy(view);
 	undecorate(view);
 
+	view_set_icon(view, NULL, NULL);
+
 	/*
 	 * The layer-shell top-layer is disabled when an application is running
 	 * in fullscreen mode, so if that's the case, we may have to re-enable
@@ -2575,7 +2649,7 @@ view_destroy(struct view *view)
 	 */
 	if (view->fullscreen && view->output) {
 		view->fullscreen = false;
-		desktop_update_top_layer_visiblity(server);
+		desktop_update_top_layer_visibility(server);
 		if (rc.adaptive_sync == LAB_ADAPTIVE_SYNC_FULLSCREEN) {
 			set_adaptive_sync_fullscreen(view);
 		}

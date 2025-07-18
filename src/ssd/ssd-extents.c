@@ -4,6 +4,7 @@
 #include <pixman.h>
 #include "common/mem.h"
 #include "common/scene-helpers.h"
+#include "config/rcxml.h"
 #include "labwc.h"
 #include "ssd-internal.h"
 #include "theme.h"
@@ -25,7 +26,8 @@ ssd_extents_create(struct ssd *ssd)
 	struct view *view = ssd->view;
 	struct theme *theme = view->server->theme;
 	struct wl_list *part_list = &ssd->extents.parts;
-	int extended_area = SSD_EXTENDED_AREA;
+
+	int border_width = MAX(0, MAX(rc.resize_minimum_area, theme->border_width));
 
 	ssd->extents.tree = wlr_scene_tree_create(ssd->tree);
 	struct wlr_scene_tree *parent = ssd->extents.tree;
@@ -34,20 +36,12 @@ ssd_extents_create(struct ssd *ssd)
 	}
 	wl_list_init(&ssd->extents.parts);
 	wlr_scene_node_set_position(&parent->node,
-		-(theme->border_width + extended_area),
-		-(ssd->titlebar.height + theme->border_width + extended_area));
+		-border_width, -(ssd->titlebar.height + border_width));
 
-	/* Top */
-	add_extent(part_list, LAB_SSD_PART_CORNER_TOP_LEFT, parent);
 	add_extent(part_list, LAB_SSD_PART_TOP, parent);
-	add_extent(part_list, LAB_SSD_PART_CORNER_TOP_RIGHT, parent);
-	/* Sides */
 	add_extent(part_list, LAB_SSD_PART_LEFT, parent);
 	add_extent(part_list, LAB_SSD_PART_RIGHT, parent);
-	/* Bottom */
-	add_extent(part_list, LAB_SSD_PART_CORNER_BOTTOM_LEFT, parent);
 	add_extent(part_list, LAB_SSD_PART_BOTTOM, parent);
-	add_extent(part_list, LAB_SSD_PART_CORNER_BOTTOM_RIGHT, parent);
 
 	/* Initial manual update to keep X11 applications happy */
 	ssd_extents_update(ssd);
@@ -75,12 +69,8 @@ ssd_extents_update(struct ssd *ssd)
 	int height = view_effective_height(view, /* use_pending */ false);
 	int full_height = height + theme->border_width * 2 + ssd->titlebar.height;
 	int full_width = width + 2 * theme->border_width;
-	int extended_area = SSD_EXTENDED_AREA;
-	int corner_width = ssd_get_corner_width();
-	int corner_size = extended_area + theme->border_width +
-		MIN(corner_width, width) / 2;
-	int side_width = full_width + extended_area * 2 - corner_size * 2;
-	int side_height = full_height + extended_area * 2 - corner_size * 2;
+	int border_width = MAX(rc.resize_minimum_area, theme->border_width);
+	int extended_area = MAX(0, rc.resize_minimum_area - theme->border_width);
 
 	struct wlr_box part_box;
 	struct wlr_box result_box;
@@ -90,8 +80,7 @@ ssd_extents_update(struct ssd *ssd)
 
 	/* Make sure we update the y offset based on titlebar shown / hidden */
 	wlr_scene_node_set_position(&ssd->extents.tree->node,
-		-(theme->border_width + extended_area),
-		-(ssd->titlebar.height + theme->border_width + extended_area));
+		-border_width, -(ssd->titlebar.height + border_width));
 
 	/*
 	 * Convert all output usable areas that the
@@ -120,53 +109,29 @@ ssd_extents_update(struct ssd *ssd)
 	wl_list_for_each(part, &ssd->extents.parts, link) {
 		rect = wlr_scene_rect_from_node(part->node);
 		switch (part->type) {
-		case LAB_SSD_PART_CORNER_TOP_LEFT:
+		case LAB_SSD_PART_TOP:
 			target.x = 0;
 			target.y = 0;
-			target.width = corner_size;
-			target.height = corner_size;
-			break;
-		case LAB_SSD_PART_TOP:
-			target.x = corner_size;
-			target.y = 0;
-			target.width = side_width;
+			target.width = full_width + extended_area * 2;
 			target.height = extended_area;
-			break;
-		case LAB_SSD_PART_CORNER_TOP_RIGHT:
-			target.x = corner_size + side_width;
-			target.y = 0;
-			target.width = corner_size;
-			target.height = corner_size;
 			break;
 		case LAB_SSD_PART_LEFT:
 			target.x = 0;
-			target.y = corner_size;
+			target.y = extended_area;
 			target.width = extended_area;
-			target.height = side_height;
+			target.height = full_height;
 			break;
 		case LAB_SSD_PART_RIGHT:
 			target.x = extended_area + full_width;
-			target.y = corner_size;
+			target.y = extended_area;
 			target.width = extended_area;
-			target.height = side_height;
-			break;
-		case LAB_SSD_PART_CORNER_BOTTOM_LEFT:
-			target.x = 0;
-			target.y = corner_size + side_height;
-			target.width = corner_size;
-			target.height = corner_size;
+			target.height = full_height;
 			break;
 		case LAB_SSD_PART_BOTTOM:
-			target.x = corner_size;
+			target.x = 0;
 			target.y = extended_area + full_height;
-			target.width = side_width;
+			target.width = full_width + extended_area * 2;
 			target.height = extended_area;
-			break;
-		case LAB_SSD_PART_CORNER_BOTTOM_RIGHT:
-			target.x = corner_size + side_width;
-			target.y = corner_size + side_height;
-			target.width = corner_size;
-			target.height = corner_size;
 			break;
 		default:
 			/* not reached */

@@ -3,16 +3,16 @@
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <string.h>
+#include <wlr/render/pixman.h>
 #include "buffer.h"
 #include "config.h"
 #include "common/mem.h"
 #include "common/scaled-font-buffer.h"
+#include "common/scaled-icon-buffer.h"
 #include "common/scaled-img-buffer.h"
 #include "common/scene-helpers.h"
 #include "common/string-helpers.h"
-#if HAVE_LIBSFDO
 #include "desktop-entry.h"
-#endif
 #include "img/img.h"
 #include "labwc.h"
 #include "node.h"
@@ -36,8 +36,8 @@ ssd_titlebar_create(struct ssd *ssd)
 	int width = view->current.width;
 	int corner_width = ssd_get_corner_width();
 
-	float *color;
 	struct wlr_scene_tree *parent;
+	struct wlr_buffer *titlebar_fill;
 	struct wlr_buffer *corner_top_left;
 	struct wlr_buffer *corner_top_right;
 	int active;
@@ -50,7 +50,7 @@ ssd_titlebar_create(struct ssd *ssd)
 		parent = subtree->tree;
 		active = (subtree == &ssd->titlebar.active) ?
 			THEME_ACTIVE : THEME_INACTIVE;
-		color = theme->window[active].title_bg_color;
+		titlebar_fill = &theme->window[active].titlebar_fill->base;
 		corner_top_left = &theme->window[active].corner_top_left_normal->base;
 		corner_top_right = &theme->window[active].corner_top_right_normal->base;
 		wlr_scene_node_set_enabled(&parent->node, active);
@@ -58,9 +58,23 @@ ssd_titlebar_create(struct ssd *ssd)
 		wl_list_init(&subtree->parts);
 
 		/* Background */
-		add_scene_rect(&subtree->parts, LAB_SSD_PART_TITLEBAR, parent,
-			width - corner_width * 2, theme->titlebar_height,
-			corner_width, 0, color);
+		struct wlr_scene_buffer *bg_scene_buffer =
+			wlr_scene_buffer_create(parent, titlebar_fill);
+		/*
+		 * Work around the wlroots/pixman bug that widened 1px buffer
+		 * becomes translucent when bilinear filtering is used.
+		 * TODO: remove once https://gitlab.freedesktop.org/wlroots/wlroots/-/issues/3990
+		 * is solved
+		 */
+		if (wlr_renderer_is_pixman(view->server->renderer)) {
+			wlr_scene_buffer_set_filter_mode(
+				bg_scene_buffer, WLR_SCALE_FILTER_NEAREST);
+		}
+		struct ssd_part *bg_part =
+			add_scene_part(&subtree->parts, LAB_SSD_PART_TITLEBAR);
+		bg_part->node = &bg_scene_buffer->node;
+		wlr_scene_node_set_position(bg_part->node, corner_width, 0);
+
 		add_scene_buffer(&subtree->parts, LAB_SSD_PART_TITLEBAR_CORNER_LEFT, parent,
 			corner_top_left, -rc.theme->border_width, -rc.theme->border_width);
 		add_scene_buffer(&subtree->parts, LAB_SSD_PART_TITLEBAR_CORNER_RIGHT, parent,
@@ -95,7 +109,6 @@ ssd_titlebar_create(struct ssd *ssd)
 	update_visible_buttons(ssd);
 
 	ssd_update_title(ssd);
-	ssd_update_window_icon(ssd);
 
 	bool maximized = view->maximized == VIEW_AXIS_BOTH;
 	bool squared = ssd_should_be_squared(ssd);
@@ -127,12 +140,14 @@ update_button_state(struct ssd_button *button, enum lab_button_state state,
 		button->state_set &= ~state;
 	}
 	/* Switch the displayed icon buffer to the new one */
-	for (uint8_t state_set = 0; state_set <= LAB_BS_ALL; state_set++) {
-		if (!button->nodes[state_set]) {
+	for (uint8_t state_set = LAB_BS_DEFAULT;
+			state_set <= LAB_BS_ALL; state_set++) {
+		struct scaled_img_buffer *buffer = button->img_buffers[state_set];
+		if (!buffer) {
 			continue;
 		}
-		wlr_scene_node_set_enabled(
-			button->nodes[state_set], button->state_set == state_set);
+		wlr_scene_node_set_enabled(&buffer->scene_buffer->node,
+			state_set == button->state_set);
 	}
 }
 
@@ -151,8 +166,9 @@ set_squared_corners(struct ssd *ssd, bool enable)
 	FOR_EACH_STATE(ssd, subtree) {
 		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLEBAR);
 		wlr_scene_node_set_position(part->node, x, 0);
-		wlr_scene_rect_set_size(wlr_scene_rect_from_node(part->node),
-			width - 2 * x, theme->titlebar_height);
+		wlr_scene_buffer_set_dest_size(
+			wlr_scene_buffer_from_node(part->node),
+			MAX(width - 2 * x, 0), theme->titlebar_height);
 
 		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLEBAR_CORNER_LEFT);
 		wlr_scene_node_set_enabled(part->node, !enable);
@@ -203,9 +219,10 @@ static void
 update_visible_buttons(struct ssd *ssd)
 {
 	struct view *view = ssd->view;
-	int width = view->current.width - (2 * view->server->theme->window_titlebar_padding_width);
-	int button_width = view->server->theme->window_button_width;
-	int button_spacing = view->server->theme->window_button_spacing;
+	struct theme *theme = view->server->theme;
+	int width = MAX(view->current.width - 2 * theme->window_titlebar_padding_width, 0);
+	int button_width = theme->window_button_width;
+	int button_spacing = theme->window_button_spacing;
 	int button_count_left = wl_list_length(&rc.title_buttons_left);
 	int button_count_right = wl_list_length(&rc.title_buttons_right);
 
@@ -298,9 +315,9 @@ ssd_titlebar_update(struct ssd *ssd)
 	int bg_offset = maximized || squared ? 0 : corner_width;
 	FOR_EACH_STATE(ssd, subtree) {
 		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLEBAR);
-		wlr_scene_rect_set_size(
-			wlr_scene_rect_from_node(part->node),
-			width - bg_offset * 2, theme->titlebar_height);
+		wlr_scene_buffer_set_dest_size(
+			wlr_scene_buffer_from_node(part->node),
+			MAX(width - bg_offset * 2, 0), theme->titlebar_height);
 
 		x = theme->window_titlebar_padding_width;
 		wl_list_for_each(b, &rc.title_buttons_left, link) {
@@ -322,7 +339,6 @@ ssd_titlebar_update(struct ssd *ssd)
 	} FOR_EACH_END
 
 	ssd_update_title(ssd);
-	ssd_update_window_icon(ssd);
 }
 
 void
@@ -341,9 +357,6 @@ ssd_titlebar_destroy(struct ssd *ssd)
 
 	if (ssd->state.title.text) {
 		zfree(ssd->state.title.text);
-	}
-	if (ssd->state.app_id) {
-		zfree(ssd->state.app_id);
 	}
 
 	wlr_scene_node_destroy(&ssd->titlebar.tree->node);
@@ -461,7 +474,7 @@ ssd_update_title(struct ssd *ssd)
 	bool title_unchanged = state->text && !strcmp(title, state->text);
 
 	const float *text_color;
-	const float *bg_color;
+	const float bg_color[4] = {0, 0, 0, 0}; /* ignored */
 	struct font *font = NULL;
 	struct ssd_part *part;
 	struct ssd_sub_tree *subtree;
@@ -477,8 +490,7 @@ ssd_update_title(struct ssd *ssd)
 			THEME_ACTIVE : THEME_INACTIVE;
 		dstate = active ? &state->active : &state->inactive;
 		text_color = theme->window[active].label_text_color;
-		bg_color = theme->window[active].title_bg_color;
-		font = &rc.font_activewindow;
+		font = active ?  &rc.font_activewindow : &rc.font_inactivewindow;
 
 		if (title_bg_width <= 0) {
 			dstate->truncated = true;
@@ -495,7 +507,9 @@ ssd_update_title(struct ssd *ssd)
 		if (!part) {
 			/* Initialize part and wlr_scene_buffer without attaching a buffer */
 			part = add_scene_part(&subtree->parts, LAB_SSD_PART_TITLE);
-			part->buffer = scaled_font_buffer_create(subtree->tree);
+			part->buffer = scaled_font_buffer_create_for_titlebar(
+				subtree->tree, theme->titlebar_height,
+				theme->window[active].titlebar_pattern);
 			if (part->buffer) {
 				part->node = &part->buffer->scene_buffer->node;
 			} else {
@@ -564,83 +578,6 @@ ssd_should_be_squared(struct ssd *ssd)
 	return (view_is_tiled_and_notify_tiled(view)
 			|| view->current.width < corner_width * 2)
 		&& view->maximized != VIEW_AXIS_BOTH;
-}
-
-void
-ssd_update_window_icon(struct ssd *ssd)
-{
-#if HAVE_LIBSFDO
-	if (!ssd) {
-		return;
-	}
-
-	const char *app_id = view_get_string_prop(ssd->view, "app_id");
-	if (string_null_or_empty(app_id)) {
-		return;
-	}
-	if (ssd->state.app_id && !strcmp(ssd->state.app_id, app_id)) {
-		return;
-	}
-
-	free(ssd->state.app_id);
-	ssd->state.app_id = xstrdup(app_id);
-
-	struct theme *theme = ssd->view->server->theme;
-
-	/*
-	 * Ensure a small amount of horizontal padding within the button
-	 * area (2px on each side with the default 26px button width).
-	 * A new theme setting could be added to configure this. Using
-	 * an existing setting (padding.width or window.button.spacing)
-	 * was considered, but these settings have distinct purposes
-	 * already and are zero by default.
-	 */
-	int icon_padding = theme->window_button_width / 10;
-	int icon_size = MIN(theme->window_button_width - 2 * icon_padding,
-		theme->window_button_height);
-
-	/*
-	 * Load/render icons at the max scale of any usable output (at
-	 * this point in time). We don't want to be constantly reloading
-	 * icons as views are moved between outputs.
-	 *
-	 * TODO: currently there's no signal to reload/render icons if
-	 * outputs are reconfigured and the max scale changes.
-	 */
-	float icon_scale = output_max_scale(ssd->view->server);
-
-	struct lab_img *icon_img = desktop_entry_icon_lookup(
-		ssd->view->server, app_id, icon_size, icon_scale);
-	if (!icon_img) {
-		wlr_log(WLR_DEBUG, "icon could not be loaded for %s", app_id);
-		return;
-	}
-
-	struct ssd_sub_tree *subtree;
-	FOR_EACH_STATE(ssd, subtree) {
-		struct ssd_part *part = ssd_get_part(
-			&subtree->parts, LAB_SSD_BUTTON_WINDOW_ICON);
-		if (!part) {
-			break;
-		}
-
-		/* Replace all the buffers in the button with the window icon */
-		struct ssd_button *button = node_ssd_button_from_node(part->node);
-		for (uint8_t state_set = 0; state_set <= LAB_BS_ALL; state_set++) {
-			struct wlr_scene_node *node = button->nodes[state_set];
-			if (node) {
-				struct scaled_img_buffer *img_buffer =
-					scaled_img_buffer_from_node(node);
-				scaled_img_buffer_update(img_buffer, icon_img,
-					theme->window_button_width,
-					theme->window_button_height,
-					icon_padding);
-			}
-		}
-	} FOR_EACH_END
-
-	lab_img_destroy(icon_img);
-#endif
 }
 
 #undef FOR_EACH_STATE

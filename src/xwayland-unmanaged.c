@@ -8,6 +8,20 @@
 #include "xwayland.h"
 
 static void
+handle_grab_focus(struct wl_listener *listener, void *data)
+{
+	struct xwayland_unmanaged *unmanaged =
+		wl_container_of(listener, unmanaged, grab_focus);
+
+	unmanaged->ever_grabbed_focus = true;
+	if (unmanaged->node) {
+		assert(unmanaged->xwayland_surface->surface);
+		seat_focus_surface(&unmanaged->server->seat,
+			unmanaged->xwayland_surface->surface);
+	}
+}
+
+static void
 handle_request_configure(struct wl_listener *listener, void *data)
 {
 	struct xwayland_unmanaged *unmanaged =
@@ -46,7 +60,8 @@ handle_map(struct wl_listener *listener, void *data)
 
 	CONNECT_SIGNAL(xsurface, unmanaged, set_geometry);
 
-	if (wlr_xwayland_or_surface_wants_focus(xsurface)) {
+	if (wlr_xwayland_surface_override_redirect_wants_focus(xsurface)
+			|| unmanaged->ever_grabbed_focus) {
 		seat_focus_surface(&unmanaged->server->seat, xsurface->surface);
 	}
 
@@ -66,18 +81,37 @@ focus_next_surface(struct server *server, struct wlr_xwayland_surface *xsurface)
 	struct wl_list *list = &server->unmanaged_surfaces;
 	wl_list_for_each_reverse(u, list, link) {
 		struct wlr_xwayland_surface *prev = u->xwayland_surface;
-		if (wlr_xwayland_or_surface_wants_focus(prev)) {
+		if (wlr_xwayland_surface_override_redirect_wants_focus(prev)
+				|| u->ever_grabbed_focus) {
 			seat_focus_surface(&server->seat, prev->surface);
 			return;
 		}
 	}
 
 	/*
-	 * If we don't find a surface to focus fall back
-	 * to the topmost mapped view. This fixes dmenu
-	 * not giving focus back when closed with ESC.
+	 * Unmanaged surfaces do not clear the active view when mapped.
+	 * Therefore, we can simply give the focus back to the active
+	 * view when the last unmanaged surface is unmapped.
+	 *
+	 * Also note that resetting the focus here is only on the
+	 * compositor side. On the xwayland server side, focus is never
+	 * given to unmanaged surfaces to begin with - keyboard grabs
+	 * are used instead.
+	 *
+	 * In the case of Globally Active input windows, calling
+	 * view_offer_focus() at this point is both unnecessary and
+	 * insufficient, since it doesn't update the seat focus
+	 * immediately and ultimately results in a loss of focus.
+	 *
+	 * For the above reasons, we avoid calling desktop_focus_view()
+	 * here and instead call seat_focus_surface() directly.
+	 *
+	 * If modifying this logic, please test for regressions with
+	 * menus/tooltips in JetBrains CLion or similar.
 	 */
-	desktop_focus_topmost_view(server);
+	if (server->active_view) {
+		seat_focus_surface(&server->seat, server->active_view->surface);
+	}
 }
 
 static void
@@ -152,9 +186,10 @@ handle_destroy(struct wl_listener *listener, void *data)
 
 	wl_list_remove(&unmanaged->associate.link);
 	wl_list_remove(&unmanaged->dissociate.link);
+	wl_list_remove(&unmanaged->grab_focus.link);
+	wl_list_remove(&unmanaged->request_activate.link);
 	wl_list_remove(&unmanaged->request_configure.link);
 	wl_list_remove(&unmanaged->set_override_redirect.link);
-	wl_list_remove(&unmanaged->request_activate.link);
 	wl_list_remove(&unmanaged->destroy.link);
 	free(unmanaged);
 }
@@ -192,9 +227,12 @@ handle_request_activate(struct wl_listener *listener, void *data)
 
 	/*
 	 * Validate that the unmanaged surface trying to grab focus is actually
-	 * a child of the topmost mapped view before granting the request.
+	 * a child of the active view before granting the request.
+	 *
+	 * FIXME: this logic is a bit incomplete/inconsistent. Refer to
+	 * https://github.com/labwc/labwc/discussions/2821 for more info.
 	 */
-	struct view *view = desktop_topmost_focusable_view(server);
+	struct view *view = server->active_view;
 	if (view && view->type == LAB_XWAYLAND_VIEW) {
 		struct wlr_xwayland_surface *surf =
 			wlr_xwayland_surface_try_from_wlr_surface(view->surface);
@@ -223,6 +261,7 @@ xwayland_unmanaged_create(struct server *server,
 	CONNECT_SIGNAL(xsurface, unmanaged, associate);
 	CONNECT_SIGNAL(xsurface, unmanaged, dissociate);
 	CONNECT_SIGNAL(xsurface, unmanaged, destroy);
+	CONNECT_SIGNAL(xsurface, unmanaged, grab_focus);
 	CONNECT_SIGNAL(xsurface, unmanaged, request_activate);
 	CONNECT_SIGNAL(xsurface, unmanaged, request_configure);
 	CONNECT_SIGNAL(xsurface, unmanaged, set_override_redirect);

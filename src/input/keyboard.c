@@ -6,6 +6,7 @@
 #include <wlr/backend/session.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include "action.h"
+#include "common/macros.h"
 #include "common/three-state.h"
 #include "idle.h"
 #include "input/ime.h"
@@ -54,17 +55,30 @@ change_vt(struct server *server, unsigned int vt)
 	wlr_session_change_vt(server->session, vt);
 }
 
-bool
-keyboard_any_modifiers_pressed(struct wlr_keyboard *keyboard)
+uint32_t
+keyboard_get_all_modifiers(struct seat *seat)
 {
-	xkb_mod_index_t i;
-	for (i = 0; i < xkb_keymap_num_mods(keyboard->keymap); i++) {
-		if (xkb_state_mod_index_is_active(keyboard->xkb_state,
-				i, XKB_STATE_MODS_DEPRESSED)) {
-			return true;
+	/*
+	 * As virtual keyboards like used by wayvnc are not part of the keyboard group,
+	 * we need to additionally get the modifiers of the virtual keyboards in addition
+	 * to the physical ones in the keyboard group. This ensures that mousebinds with
+	 * keyboard modifiers are detected correctly when using for example a VNC client
+	 * via wayvnc to control labwc. This function also gets called to decide when to
+	 * hide the window switcher and workspace OSDs and to indicate if the user wants
+	 * to snap a window to a region during a window move operation.
+	 */
+	struct input *input;
+	uint32_t modifiers = wlr_keyboard_get_modifiers(&seat->keyboard_group->keyboard);
+	wl_list_for_each(input, &seat->inputs, link) {
+		if (input->wlr_input_device->type != WLR_INPUT_DEVICE_KEYBOARD) {
+			continue;
+		}
+		struct keyboard *kb = wl_container_of(input, kb, base);
+		if (kb->is_virtual) {
+			modifiers |= wlr_keyboard_get_modifiers(kb->wlr_keyboard);
 		}
 	}
-	return false;
+	return modifiers;
 }
 
 static void
@@ -91,8 +105,14 @@ seat_client_from_keyboard_resource(struct wl_resource *resource)
 
 static void
 broadcast_modifiers_to_unfocused_clients(struct wlr_seat *seat,
+		const struct keyboard *keyboard,
 		const struct wlr_keyboard_modifiers *modifiers)
 {
+	/* Prevent overwriting the group modifier by a virtual keyboard */
+	if (keyboard->is_virtual) {
+		return;
+	}
+
 	struct wlr_seat_client *client;
 	wl_list_for_each(client, &seat->clients, link) {
 		if (client == seat->keyboard_state.focused_client) {
@@ -121,9 +141,9 @@ broadcast_modifiers_to_unfocused_clients(struct wlr_seat *seat,
 }
 
 static void
-keyboard_modifiers_notify(struct wl_listener *listener, void *data)
+handle_modifiers(struct wl_listener *listener, void *data)
 {
-	struct keyboard *keyboard = wl_container_of(listener, keyboard, modifier);
+	struct keyboard *keyboard = wl_container_of(listener, keyboard, modifiers);
 	struct seat *seat = keyboard->base.seat;
 	struct server *server = seat->server;
 	struct wlr_keyboard *wlr_keyboard = keyboard->wlr_keyboard;
@@ -139,7 +159,7 @@ keyboard_modifiers_notify(struct wl_listener *listener, void *data)
 					== LAB_INPUT_STATE_WINDOW_SWITCHER;
 
 	if (window_switcher_active || seat->workspace_osd_shown_by_modifier) {
-		if (!keyboard_any_modifiers_pressed(wlr_keyboard)) {
+		if (!keyboard_get_all_modifiers(seat)) {
 			if (window_switcher_active) {
 				if (key_state_nr_bound_keys()) {
 					should_cancel_cycling_on_next_key_release = true;
@@ -178,7 +198,7 @@ keyboard_modifiers_notify(struct wl_listener *listener, void *data)
 		 * clients with pointer-focus (see issue #2271)
 		 */
 		broadcast_modifiers_to_unfocused_clients(seat->seat,
-			&wlr_keyboard->modifiers);
+			keyboard, &wlr_keyboard->modifiers);
 	}
 }
 
@@ -339,7 +359,7 @@ get_keyinfo(struct wlr_keyboard *wlr_keyboard, uint32_t evdev_keycode)
 		&keyinfo.raw.syms);
 
 	/*
-	 * keyboard_key_notify() is called before keyboard_key_modifier(),
+	 * handle_key() is called before handle_modifiers(),
 	 * so 'modifiers' refers to modifiers that were pressed before the
 	 * key event in hand. Consequently, we use is_modifier_key() to
 	 * find out if the key event being processed is a modifier.
@@ -435,6 +455,7 @@ handle_menu_keys(struct server *server, struct keysyms *syms)
 			menu_submenu_leave(server);
 			break;
 		case XKB_KEY_Return:
+		case XKB_KEY_KP_Enter:
 			menu_call_selected_actions(server);
 			break;
 		case XKB_KEY_Escape:
@@ -612,7 +633,7 @@ keyboard_cancel_all_keybind_repeats(struct seat *seat)
 }
 
 static void
-keyboard_key_notify(struct wl_listener *listener, void *data)
+handle_key(struct wl_listener *listener, void *data)
 {
 	/* This event is raised when a key is pressed or released. */
 	struct keyboard *keyboard = wl_container_of(listener, keyboard, key);
@@ -802,12 +823,8 @@ keyboard_group_init(struct seat *seat)
 void
 keyboard_setup_handlers(struct keyboard *keyboard)
 {
-	struct wlr_keyboard *wlr_kb = keyboard->wlr_keyboard;
-
-	keyboard->key.notify = keyboard_key_notify;
-	wl_signal_add(&wlr_kb->events.key, &keyboard->key);
-	keyboard->modifier.notify = keyboard_modifiers_notify;
-	wl_signal_add(&wlr_kb->events.modifiers, &keyboard->modifier);
+	CONNECT_SIGNAL(keyboard->wlr_keyboard, keyboard, key);
+	CONNECT_SIGNAL(keyboard->wlr_keyboard, keyboard, modifiers);
 }
 
 void

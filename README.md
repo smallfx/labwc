@@ -16,10 +16,10 @@ href="NEWS.md">Release&nbsp;Notes</a>]</h3>
 - [2. Build and Installation](#2-build-and-installation)
 - [3. Configuration](#3-configuration)
 - [4. Theming](#4-theming)
-- [5. Translations](#5-translations)
-- [6. Usage](#6-usage)
-  - [6.1 Gaming](#61-gaming)
-- [7. Integration](#7-integration)
+- [5. Usage](#5-usage)
+  - [5.1 Gaming](#51-gaming)
+- [6. Integration](#6-integration)
+- [7. Translations](#7-translations)
 
 ## 1. Project Description
 
@@ -28,13 +28,13 @@ href="NEWS.md">Release&nbsp;Notes</a>]</h3>
 Labwc stands for Lab Wayland Compositor, where lab can mean any of the
 following:
 
-- Lightweight And Box-inspired
+- lightweight and *box-inspired
 - sense of experimentation and treading new ground
 - inspired by BunsenLabs and ArchLabs
 - your favorite pet
 
-Labwc is a [wlroots]-based window-stacking compositor for [wayland], inspired
-by [openbox].
+Labwc is a [wlroots]-based window-stacking compositor for [Wayland], inspired
+by [Openbox].
 
 It is light-weight and independent with a focus on simply stacking windows well
 and rendering some window decorations. It takes a no-bling/frills approach and
@@ -74,19 +74,19 @@ its job well. In this regard we follow in the footsteps of [metacity] which
 describes itself as a "Boring window manager for the adult in you. Many window
 managers are like Marshmallow Froot Loops; Metacity is like Cheerios."
 
-Finally, we think that an elegant solution to all of this does not need feel
+Finally, we think that an elegant solution to all of this does not need to feel
 square and pixelated like something out of the 1990s, but should look
 contemporary and enable cutting-edge performance.
 
 ### 1.3 Why The Openbox Theme Specification?
 
-In order to avoid reinventing configuration and theme syntaxes, the [openbox]
-3.6 specification is used. This does not mean that labwc is an openbox clone
+In order to avoid reinventing configuration and theme syntaxes, the [Openbox]
+3.6 specification is used. This does not mean that Labwc is an Openbox clone
 but rather that configuration files will look and feel familiar.
 
 Also, parsing GTK3+ and Qt themes for window decorations is very complicated,
-so using much simpler specs such as those used by openbox and xfwm makes sense
-for a compositor such as labwc, both in terms of implementation and for user
+so using much simpler specs such as those used by Openbox and xfwm makes sense
+for a compositor such as Labwc, both in terms of implementation and for user
 modification.
 
 Openbox spec is somewhat of a stable standard considering how long it has
@@ -120,11 +120,13 @@ High-level summary of items that Labwc supports:
 
 | video link                | date        | duration
 | ------------------------- | ------------| -------
+| [0.8.3-release-video]     | 03-Mar-2025 | 2:35
 | [0.7.2-release-video]     | 24-May-2024 | 3:17
 | [0.6.0-release-video]     | 31-Oct-2022 | 2:48
 | [0.3.0-release-video]     | 05-Aug-2021 | 1:10
 | [pre-0.1.0-release-video] | 25-Feb-2021 | 3:42
 
+[0.8.3-release-video]: https://youtu.be/HGzqci_THwA
 [0.7.2-release-video]: https://youtu.be/gNIj6VU-IH8
 [0.6.0-release-video]: https://youtu.be/guBnx18EQiA
 [0.3.0-release-video]: https://youtu.be/AU_M3n_FS-E
@@ -154,6 +156,7 @@ Run-time dependencies include:
 - libxml2, cairo, pango, glib-2.0
 - libpng
 - librsvg >=2.46 (optional)
+- libsfdo (optional)
 - xwayland, xcb (optional)
 
 Build dependencies include:
@@ -192,7 +195,7 @@ For a step-by-step initial configuration guide, see [getting-started].
 
 ## 4. Theming
 
-Themes are located at `~/.local/share/themes/\<theme-name\>/openbox-3/` or
+Themes are located at `~/.local/share/themes/\<theme-name\>/labwc/` or
 equivalent `XDG_DATA_{DIRS,HOME}` location in accordance with freedesktop XDG
 directory specification.
 
@@ -205,15 +208,7 @@ For themes, search the internet for "openbox themes" and place them in
 - https://github.com/the-zero885/Lubuntu-Arc-Round-Openbox-Theme
 - https://github.com/BunsenLabs/bunsen-themes
 
-## 5. Translations
-
-The default window bar menu can be translated on the [weblate platform](https://translate.lxqt-project.org/projects/labwc/labwc/).
-
-<a href="https://translate.lxqt-project.org/engage/labwc/?utm_source=widget">
-<img src="https://translate.lxqt-project.org/widgets/labwc/-/labwc/multi-blue.svg" alt="Translation status" />
-</a>
-
-## 6. Usage
+## 5. Usage
 
     ./build/labwc [-s <command>]
 
@@ -226,13 +221,11 @@ If you have not created an rc.xml config file, default bindings will be:
 | ------------------------ | ------
 | `alt`-`tab`              | activate next window
 | `alt`-`shift`-`tab`      | activate previous window
-| `super`-`return`         | alacritty
-| `alt`-`F3`               | bemenu
+| `super`-`return`         | lab-sensible-terminal
 | `alt`-`F4`               | close window
 | `super`-`a`              | toggle maximize
-| `alt`-`mouse-left`       | move window
-| `alt`-`mouse-right`      | resize window
-| `alt`-`arrow`            | move window to edge
+| `super`-`mouse-left`     | move window
+| `super`-`mouse-right`    | resize window
 | `super`-`arrow`          | resize window to fill half the output
 | `alt`-`space`            | show the window menu
 | `XF86_AudioLowerVolume`  | amixer sset Master 5%-
@@ -243,29 +236,38 @@ If you have not created an rc.xml config file, default bindings will be:
 
 A root-menu can be opened by clicking on the desktop.
 
-### 6.1 Gaming
+### 5.1 Gaming
 
 Cursor confinement is supported from version `0.6.2`. If using older versions,
 use a nested [gamescope] instance for gaming.  It can be added to steam via
 game launch option: `gamescope -f -- %command%`.
 
-## 7. Integration
+## 6. Integration
 
-Suggested apps to use with labwc:
+Suggested apps to use with Labwc:
 
 - Screen shooter: [grim]
 - Screen recorder: [wf-recorder]
 - Background image: [swaybg]
-- Panel: [waybar], [yambar], [lavalauncher], [sfwbar]
+- Panel: [waybar], [yambar], [lavalauncher], [sfwbar], [xfce4-panel]
 - Launchers: [bemenu], [fuzzel], [wofi]
 - Output managers: [wlopm], [kanshi], [wlr-randr]
 - Screen locker: [swaylock]
 - Gamma adjustment: [gammastep]
+- Idle screen inhibitor: [sway-audio-idle-inhibit]
 
 See [integration] for further details.
 
-[wayland]: https://wayland.freedesktop.org/
-[openbox]: https://openbox.org/help/Contents
+## 7. Translations
+
+The default window bar menu can be translated on the [weblate platform](https://translate.lxqt-project.org/projects/labwc/labwc/).
+
+<a href="https://translate.lxqt-project.org/engage/labwc/?utm_source=widget">
+<img src="https://translate.lxqt-project.org/widgets/labwc/-/labwc/multi-blue.svg" alt="Translation status" />
+</a>
+
+[Wayland]: https://wayland.freedesktop.org/
+[Openbox]: https://openbox.org/help/Contents
 [wlroots]: https://gitlab.freedesktop.org/wlroots/wlroots
 [sway]: https://github.com/swaywm
 [wayland-protocols]: https://gitlab.freedesktop.org/wayland/wayland-protocols
@@ -293,6 +295,7 @@ See [integration] for further details.
 [yambar]: https://codeberg.org/dnkl/yambar
 [lavalauncher]: https://sr.ht/~leon_plickat/LavaLauncher
 [sfwbar]: https://github.com/LBCrion/sfwbar
+[xfce4-panel]: https://gitlab.xfce.org/xfce/xfce4-panel
 [bemenu]: https://github.com/Cloudef/bemenu
 [fuzzel]: https://codeberg.org/dnkl/fuzzel
 [wofi]: https://hg.sr.ht/~scoopta/wofi
@@ -301,4 +304,4 @@ See [integration] for further details.
 [wlr-randr]: https://sr.ht/~emersion/wlr-randr/
 [swaylock]: https://github.com/swaywm/swaylock
 [gammastep]: https://gitlab.com/chinstrap/gammastep
-
+[sway-audio-idle-inhibit]: https://github.com/ErikReider/SwayAudioIdleInhibit

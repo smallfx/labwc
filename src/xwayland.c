@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <wlr/xwayland.h>
+#include "buffer.h"
 #include "common/array.h"
 #include "common/macros.h"
 #include "common/mem.h"
@@ -18,29 +19,63 @@
 #include "workspaces.h"
 #include "xwayland.h"
 
-xcb_atom_t atoms[WINDOW_TYPE_LEN] = {0};
+enum atoms {
+	ATOM_NET_WM_ICON = 0,
+
+	ATOM_COUNT,
+};
+
+static const char * const atom_names[] = {
+	[ATOM_NET_WM_ICON] = "_NET_WM_ICON",
+};
+
+static_assert(ARRAY_SIZE(atom_names) == ATOM_COUNT, "atom names out of sync");
+
+static xcb_atom_t atoms[ATOM_COUNT] = {0};
 
 static void xwayland_view_unmap(struct view *view, bool client_request);
 
 static bool
-xwayland_surface_contains_window_type(
-		struct wlr_xwayland_surface *surface, enum window_type window_type)
+xwayland_view_contains_window_type(struct view *view,
+		enum window_type window_type)
 {
-	assert(surface);
-	for (size_t i = 0; i < surface->window_type_len; i++) {
-		if (surface->window_type[i] == atoms[window_type]) {
-			return true;
-		}
-	}
-	return false;
-}
+	/* Compile-time check that the enum types match */
+	static_assert(NET_WM_WINDOW_TYPE_DESKTOP ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DESKTOP
+		&& NET_WM_WINDOW_TYPE_DOCK ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DOCK
+		&& NET_WM_WINDOW_TYPE_TOOLBAR ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR
+		&& NET_WM_WINDOW_TYPE_MENU ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_MENU
+		&& NET_WM_WINDOW_TYPE_UTILITY ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_UTILITY
+		&& NET_WM_WINDOW_TYPE_SPLASH ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH
+		&& NET_WM_WINDOW_TYPE_DIALOG ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DIALOG
+		&& NET_WM_WINDOW_TYPE_DROPDOWN_MENU ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU
+		&& NET_WM_WINDOW_TYPE_POPUP_MENU ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU
+		&& NET_WM_WINDOW_TYPE_TOOLTIP ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLTIP
+		&& NET_WM_WINDOW_TYPE_NOTIFICATION ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_NOTIFICATION
+		&& NET_WM_WINDOW_TYPE_COMBO ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_COMBO
+		&& NET_WM_WINDOW_TYPE_DND ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DND
+		&& NET_WM_WINDOW_TYPE_NORMAL ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_NORMAL
+		&& WINDOW_TYPE_LEN ==
+			(int)WLR_XWAYLAND_NET_WM_WINDOW_TYPE_NORMAL + 1,
+		"enum window_type does not match wlr_xwayland_net_wm_window_type");
 
-static bool
-xwayland_view_contains_window_type(struct view *view, int32_t window_type)
-{
 	assert(view);
 	struct wlr_xwayland_surface *surface = xwayland_surface_from_view(view);
-	return xwayland_surface_contains_window_type(surface, window_type);
+	return wlr_xwayland_surface_has_window_type(surface,
+		(enum wlr_xwayland_net_wm_window_type)window_type);
 }
 
 static struct view_size_hints
@@ -66,7 +101,7 @@ xwayland_view_wants_focus(struct view *view)
 	struct wlr_xwayland_surface *xsurface =
 		xwayland_surface_from_view(view);
 
-	switch (wlr_xwayland_icccm_input_model(xsurface)) {
+	switch (wlr_xwayland_surface_icccm_input_model(xsurface)) {
 	/*
 	 * Abbreviated from ICCCM section 4.1.7 (Input Focus):
 	 *
@@ -94,24 +129,19 @@ xwayland_view_wants_focus(struct view *view)
 	 * Globally Active client windows may receive a WM_TAKE_FOCUS
 	 * message from the window manager. If they want the focus, they
 	 * should respond with a SetInputFocus request.
-	 *
-	 * [Currently, labwc does not fully support clients voluntarily
-	 * taking focus via the WM_TAKE_FOCUS + SetInputFocus mechanism.
-	 * Instead, we try to guess whether the window wants focus based
-	 * on some heuristics -- see below.]
 	 */
 	case WLR_ICCCM_INPUT_MODEL_GLOBAL:
 		/*
-		 * Assume that NORMAL and DIALOG windows always want
-		 * focus. These window types should show up in the
+		 * Assume that NORMAL and DIALOG windows are likely to
+		 * want focus. These window types should show up in the
 		 * Alt-Tab switcher and be automatically focused when
 		 * they become topmost.
 		 */
-		return (xwayland_surface_contains_window_type(xsurface,
-				NET_WM_WINDOW_TYPE_NORMAL)
-			|| xwayland_surface_contains_window_type(xsurface,
-				NET_WM_WINDOW_TYPE_DIALOG)) ?
-			VIEW_WANTS_FOCUS_ALWAYS : VIEW_WANTS_FOCUS_OFFER;
+		return (wlr_xwayland_surface_has_window_type(xsurface,
+				WLR_XWAYLAND_NET_WM_WINDOW_TYPE_NORMAL)
+			|| wlr_xwayland_surface_has_window_type(xsurface,
+				WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DIALOG)) ?
+			VIEW_WANTS_FOCUS_LIKELY : VIEW_WANTS_FOCUS_UNLIKELY;
 
 	/*
 	 * No Input - The client never expects keyboard input.
@@ -133,6 +163,12 @@ xwayland_view_has_strut_partial(struct view *view)
 	struct wlr_xwayland_surface *xsurface =
 		xwayland_surface_from_view(view);
 	return (bool)xsurface->strut_partial;
+}
+
+static void
+xwayland_view_offer_focus(struct view *view)
+{
+	wlr_xwayland_surface_offer_focus(xwayland_surface_from_view(view));
 }
 
 static struct wlr_xwayland_surface *
@@ -331,6 +367,7 @@ handle_destroy(struct wl_listener *listener, void *data)
 	wl_list_remove(&xwayland_view->set_override_redirect.link);
 	wl_list_remove(&xwayland_view->set_strut_partial.link);
 	wl_list_remove(&xwayland_view->set_window_type.link);
+	wl_list_remove(&xwayland_view->focus_in.link);
 	wl_list_remove(&xwayland_view->map_request.link);
 
 	view_destroy(view);
@@ -402,11 +439,6 @@ handle_request_activate(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	if (view->server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
-		wlr_log(WLR_INFO, "Preventing focus request while in window switcher");
-		return;
-	}
-
 	desktop_focus_view(view, /*raise*/ true);
 }
 
@@ -422,19 +454,28 @@ static void
 handle_request_maximize(struct wl_listener *listener, void *data)
 {
 	struct view *view = wl_container_of(listener, view, request_maximize);
+	struct wlr_xwayland_surface *surf = xwayland_surface_from_view(view);
 	if (!view->mapped) {
 		ensure_initial_geometry_and_output(view);
 		/*
 		 * Set decorations early to avoid changing geometry
 		 * after maximize (reduces visual glitches).
 		 */
-		if (want_deco(xwayland_surface_from_view(view))) {
+		if (want_deco(surf)) {
 			view_set_ssd_mode(view, LAB_SSD_MODE_FULL);
 		} else {
 			view_set_ssd_mode(view, LAB_SSD_MODE_NONE);
 		}
 	}
-	view_toggle_maximize(view, VIEW_AXIS_BOTH);
+
+	enum view_axis maximize = VIEW_AXIS_NONE;
+	if (surf->maximized_vert) {
+		maximize |= VIEW_AXIS_VERTICAL;
+	}
+	if (surf->maximized_horz) {
+		maximize |= VIEW_AXIS_HORIZONTAL;
+	}
+	view_maximize(view, maximize, /*store_natural_geometry*/ true);
 }
 
 static void
@@ -552,6 +593,94 @@ handle_set_strut_partial(struct wl_listener *listener, void *data)
 
 	if (view->mapped) {
 		output_update_all_usable_areas(view->server, false);
+	}
+}
+
+static void
+update_icon(struct xwayland_view *xwayland_view)
+{
+	if (!xwayland_view->xwayland_surface) {
+		return;
+	}
+
+	xcb_window_t window_id = xwayland_view->xwayland_surface->window_id;
+
+	xcb_connection_t *xcb_conn = wlr_xwayland_get_xwm_connection(
+		xwayland_view->base.server->xwayland);
+	xcb_get_property_cookie_t cookie = xcb_get_property(xcb_conn, 0,
+		window_id, atoms[ATOM_NET_WM_ICON], XCB_ATOM_CARDINAL, 0, 0x10000);
+	xcb_get_property_reply_t *reply = xcb_get_property_reply(xcb_conn, cookie, NULL);
+	if (!reply) {
+		return;
+	}
+	xcb_ewmh_get_wm_icon_reply_t icon;
+	if (!xcb_ewmh_get_wm_icon_from_reply(&icon, reply)) {
+		wlr_log(WLR_INFO, "Invalid x11 icon");
+		view_set_icon(&xwayland_view->base, NULL, NULL);
+		goto out;
+	}
+
+	xcb_ewmh_wm_icon_iterator_t iter = xcb_ewmh_get_wm_icon_iterator(&icon);
+	struct wl_array buffers;
+	wl_array_init(&buffers);
+	for (; iter.rem; xcb_ewmh_get_wm_icon_next(&iter)) {
+		size_t stride = iter.width * 4;
+		uint32_t *buf = xzalloc(iter.height * stride);
+
+		/* Pre-multiply alpha */
+		for (uint32_t y = 0; y < iter.height; y++) {
+			for (uint32_t x = 0; x < iter.width; x++) {
+				uint32_t i = x + y * iter.width;
+				uint8_t *src_pixel = (uint8_t *)&iter.data[i];
+				uint8_t *dst_pixel = (uint8_t *)&buf[i];
+				dst_pixel[0] = src_pixel[0] * src_pixel[3] / 255;
+				dst_pixel[1] = src_pixel[1] * src_pixel[3] / 255;
+				dst_pixel[2] = src_pixel[2] * src_pixel[3] / 255;
+				dst_pixel[3] = src_pixel[3];
+			}
+		}
+
+		struct lab_data_buffer *buffer = buffer_create_from_data(
+			buf, iter.width, iter.height, stride);
+		array_add(&buffers, buffer);
+	}
+
+	/* view takes ownership of the buffers */
+	view_set_icon(&xwayland_view->base, NULL, &buffers);
+	wl_array_release(&buffers);
+
+out:
+	free(reply);
+}
+
+static void
+handle_focus_in(struct wl_listener *listener, void *data)
+{
+	struct xwayland_view *xwayland_view =
+		wl_container_of(listener, xwayland_view, focus_in);
+	struct view *view = &xwayland_view->base;
+	struct seat *seat = &view->server->seat;
+
+	if (!view->surface) {
+		/*
+		 * It is rare but possible for the focus_in event to be
+		 * received before the map event. This has been seen
+		 * during CLion startup, when focus is initially offered
+		 * to the splash screen but accepted later by the main
+		 * window instead. (In this case, the focus transfer is
+		 * client-initiated but allowed by wlroots because the
+		 * same PID owns both windows.)
+		 *
+		 * Set a flag to record this condition, and update the
+		 * seat focus later when the view is actually mapped.
+		 */
+		wlr_log(WLR_DEBUG, "focus_in received before map");
+		xwayland_view->focused_before_map = true;
+		return;
+	}
+
+	if (view->surface != seat->seat->keyboard_state.focused_surface) {
+		seat_focus_surface(seat, view->surface);
 	}
 }
 
@@ -735,7 +864,7 @@ xwayland_view_map(struct view *view)
 			wl_resource_post_no_memory(view->surface->resource);
 			return;
 		}
-		view->content_node = &tree->node;
+		view->content_tree = tree;
 	}
 
 	/*
@@ -767,6 +896,18 @@ xwayland_view_map(struct view *view)
 	/* Add commit here, as xwayland map/unmap can change the wlr_surface */
 	wl_signal_add(&xwayland_surface->surface->events.commit, &view->commit);
 	view->commit.notify = handle_commit;
+
+	/*
+	 * If the view was focused (on the xwayland server side) before
+	 * being mapped, update the seat focus now. Note that this only
+	 * really matters in the case of Globally Active input windows.
+	 * In all other cases, it's redundant since view_impl_map()
+	 * results in the view being focused anyway.
+	 */
+	if (xwayland_view->focused_before_map) {
+		xwayland_view->focused_before_map = false;
+		seat_focus_surface(&view->server->seat, view->surface);
+	}
 
 	view_impl_map(view);
 	view->been_mapped = true;
@@ -806,10 +947,10 @@ out:
 }
 
 static void
-xwayland_view_maximize(struct view *view, bool maximized)
+xwayland_view_maximize(struct view *view, enum view_axis maximized)
 {
 	wlr_xwayland_surface_set_maximized(xwayland_surface_from_view(view),
-		maximized);
+		maximized & VIEW_AXIS_HORIZONTAL, maximized & VIEW_AXIS_VERTICAL);
 }
 
 static void
@@ -817,40 +958,6 @@ xwayland_view_minimize(struct view *view, bool minimized)
 {
 	wlr_xwayland_surface_set_minimized(xwayland_surface_from_view(view),
 		minimized);
-}
-
-static void
-xwayland_view_move_to_front(struct view *view)
-{
-	view_impl_move_to_front(view);
-
-	if (view->shaded) {
-		/*
-		 * Ensure that we don't raise a shaded window
-		 * to the front which then steals mouse events.
-		 */
-		return;
-	}
-
-	/*
-	 * Update XWayland stacking order.
-	 *
-	 * FIXME: it would be better to restack above the next lower
-	 * view, rather than on top of all other surfaces. Restacking
-	 * the unmanaged surfaces afterward is ugly and still doesn't
-	 * account for always-on-top views.
-	 */
-	wlr_xwayland_surface_restack(xwayland_surface_from_view(view),
-		NULL, XCB_STACK_MODE_ABOVE);
-}
-
-static void
-xwayland_view_move_to_back(struct view *view)
-{
-	view_impl_move_to_back(view);
-	/* Update XWayland stacking order */
-	wlr_xwayland_surface_restack(xwayland_surface_from_view(view),
-		NULL, XCB_STACK_MODE_BELOW);
 }
 
 static struct view *
@@ -899,6 +1006,12 @@ xwayland_view_append_children(struct view *self, struct wl_array *children)
 	}
 }
 
+static bool
+xwayland_view_is_modal_dialog(struct view *self)
+{
+	return xwayland_surface_from_view(self)->modal;
+}
+
 static void
 xwayland_view_set_activated(struct view *view, bool activated)
 {
@@ -932,20 +1045,6 @@ xwayland_view_get_pid(struct view *view)
 	return xwayland_surface->pid;
 }
 
-static void
-xwayland_view_shade(struct view *view, bool shaded)
-{
-	assert(view);
-
-	/* Ensure that clicks on some xwayland surface don't end up on the shaded one */
-	if (shaded) {
-		wlr_xwayland_surface_restack(xwayland_surface_from_view(view),
-			NULL, XCB_STACK_MODE_BELOW);
-	} else {
-		xwayland_adjust_stacking_order(view->server);
-	}
-}
-
 static const struct view_impl xwayland_view_impl = {
 	.configure = xwayland_view_configure,
 	.close = xwayland_view_close,
@@ -956,13 +1055,12 @@ static const struct view_impl xwayland_view_impl = {
 	.unmap = xwayland_view_unmap,
 	.maximize = xwayland_view_maximize,
 	.minimize = xwayland_view_minimize,
-	.move_to_front = xwayland_view_move_to_front,
-	.move_to_back = xwayland_view_move_to_back,
-	.shade = xwayland_view_shade,
 	.get_root = xwayland_view_get_root,
 	.append_children = xwayland_view_append_children,
+	.is_modal_dialog = xwayland_view_is_modal_dialog,
 	.get_size_hints = xwayland_view_get_size_hints,
 	.wants_focus = xwayland_view_wants_focus,
+	.offer_focus = xwayland_view_offer_focus,
 	.has_strut_partial = xwayland_view_has_strut_partial,
 	.contains_window_type = xwayland_view_contains_window_type,
 	.get_pid = xwayland_view_get_pid,
@@ -978,6 +1076,7 @@ xwayland_view_create(struct server *server,
 	view->server = server;
 	view->type = LAB_XWAYLAND_VIEW;
 	view->impl = &xwayland_view_impl;
+	view_init(view);
 
 	/*
 	 * Set two-way view <-> xsurface association.  Usually the association
@@ -1011,9 +1110,9 @@ xwayland_view_create(struct server *server,
 	CONNECT_SIGNAL(xsurface, xwayland_view, set_override_redirect);
 	CONNECT_SIGNAL(xsurface, xwayland_view, set_strut_partial);
 	CONNECT_SIGNAL(xsurface, xwayland_view, set_window_type);
+	CONNECT_SIGNAL(xsurface, xwayland_view, focus_in);
 	CONNECT_SIGNAL(xsurface, xwayland_view, map_request);
 
-	view_init(view);
 	wl_list_insert(&view->server->views, &view->link);
 
 	if (xsurface->surface) {
@@ -1043,21 +1142,67 @@ handle_new_surface(struct wl_listener *listener, void *data)
 	}
 }
 
-static void
-sync_atoms(xcb_connection_t *xcb_conn)
+static struct xwayland_view *
+xwayland_view_from_window_id(struct server *server, xcb_window_t id)
 {
+	struct view *view;
+	wl_list_for_each(view, &server->views, link) {
+		if (view->type != LAB_XWAYLAND_VIEW) {
+			continue;
+		}
+		struct xwayland_view *xwayland_view = xwayland_view_from_view(view);
+		if (xwayland_view->xwayland_surface
+				&& xwayland_view->xwayland_surface->window_id == id) {
+			return xwayland_view;
+		}
+	}
+	return NULL;
+}
+
+#define XCB_EVENT_RESPONSE_TYPE_MASK 0x7f
+static bool
+handle_x11_event(struct wlr_xwayland *wlr_xwayland, xcb_generic_event_t *event)
+{
+	switch (event->response_type & XCB_EVENT_RESPONSE_TYPE_MASK) {
+	case XCB_PROPERTY_NOTIFY: {
+		xcb_property_notify_event_t *ev = (void *)event;
+		if (ev->atom == atoms[ATOM_NET_WM_ICON]) {
+			struct server *server = wlr_xwayland->data;
+			struct xwayland_view *xwayland_view =
+				xwayland_view_from_window_id(server, ev->window);
+			if (xwayland_view) {
+				update_icon(xwayland_view);
+			} else {
+				wlr_log(WLR_DEBUG, "icon property changed for unknown window");
+			}
+			return true;
+		}
+		break;
+	}
+	default:
+		break;
+	}
+
+	return false;
+}
+
+static void
+sync_atoms(struct server *server)
+{
+	xcb_connection_t *xcb_conn =
+		wlr_xwayland_get_xwm_connection(server->xwayland);
 	assert(xcb_conn);
 
 	wlr_log(WLR_DEBUG, "Syncing X11 atoms");
-	xcb_intern_atom_cookie_t cookies[WINDOW_TYPE_LEN];
+	xcb_intern_atom_cookie_t cookies[ATOM_COUNT];
 
 	/* First request everything and then loop over the results to reduce latency */
-	for (size_t i = 0; i < WINDOW_TYPE_LEN; i++) {
+	for (size_t i = 0; i < ATOM_COUNT; i++) {
 		cookies[i] = xcb_intern_atom(xcb_conn, 0,
 			strlen(atom_names[i]), atom_names[i]);
 	}
 
-	for (size_t i = 0; i < WINDOW_TYPE_LEN; i++) {
+	for (size_t i = 0; i < ATOM_COUNT; i++) {
 		xcb_generic_error_t *err = NULL;
 		xcb_intern_atom_reply_t *reply =
 			xcb_intern_atom_reply(xcb_conn, cookies[i], &err);
@@ -1067,6 +1212,7 @@ sync_atoms(xcb_connection_t *xcb_conn)
 				atom_names[i], reply->atom);
 		}
 		if (err) {
+			atoms[i] = XCB_ATOM_NONE;
 			wlr_log(WLR_INFO, "Failed to get X11 atom for %s",
 				atom_names[i]);
 		}
@@ -1081,21 +1227,9 @@ handle_server_ready(struct wl_listener *listener, void *data)
 	/* Fire an Xwayland startup script if one (or many) can be found */
 	session_run_script("xinitrc");
 
-	xcb_connection_t *xcb_conn = xcb_connect(NULL, NULL);
-	if (xcb_connection_has_error(xcb_conn)) {
-		wlr_log(WLR_ERROR, "Failed to create xcb connection");
-
-		/* Just clear all existing atoms */
-		for (size_t i = 0; i < WINDOW_TYPE_LEN; i++) {
-			atoms[i] = XCB_ATOM_NONE;
-		}
-		return;
-	}
-
-	wlr_log(WLR_DEBUG, "Connected to xwayland");
-	sync_atoms(xcb_conn);
-	wlr_log(WLR_DEBUG, "Disconnecting from xwayland");
-	xcb_disconnect(xcb_conn);
+	struct server *server =
+		wl_container_of(listener, server, xwayland_server_ready);
+	sync_atoms(server);
 }
 
 static void
@@ -1129,6 +1263,9 @@ xwayland_server_init(struct server *server, struct wlr_compositor *compositor)
 	wl_signal_add(&server->xwayland->events.ready,
 		&server->xwayland_xwm_ready);
 
+	server->xwayland->data = server;
+	server->xwayland->user_event_handler = handle_x11_event;
+
 	if (setenv("DISPLAY", server->xwayland->display_name, true) < 0) {
 		wlr_log_errno(WLR_ERROR, "unable to set DISPLAY for xwayland");
 	} else {
@@ -1146,46 +1283,6 @@ xwayland_server_init(struct server *server, struct wlr_compositor *compositor)
 			image->height, image->hotspot_x,
 			image->hotspot_y);
 	}
-}
-
-/*
- * Until we expose the workspaces to xwayland we need a way to
- * ensure that xwayland views on the current workspace are always
- * stacked above xwayland views on other workspaces.
- *
- * If we fail to do so, issues arise in scenarios where we change
- * the mouse focus but do not change the (xwayland) stacking order.
- *
- * Reproducer:
- * - open at least two xwayland windows which allow scrolling
- *   (some X11 terminal with 'man man' for example)
- * - switch to another workspace, open another xwayland
- *   window which allows scrolling and maximize it
- * - switch back to the previous workspace with the two windows
- * - move the mouse to the xwayland window that does *not* have focus
- * - start scrolling
- * - all scroll events should end up on the maximized window on the other workspace
- */
-void
-xwayland_adjust_stacking_order(struct server *server)
-{
-	struct view **view;
-	struct wl_array views;
-
-	wl_array_init(&views);
-	view_array_append(server, &views, LAB_VIEW_CRITERIA_ALWAYS_ON_TOP);
-	view_array_append(server, &views, LAB_VIEW_CRITERIA_CURRENT_WORKSPACE
-		| LAB_VIEW_CRITERIA_NO_ALWAYS_ON_TOP);
-
-	/*
-	 * view_array_append() provides top-most windows
-	 * first so we simply reverse the iteration here
-	 */
-	wl_array_for_each_reverse(view, &views) {
-		view_move_to_front(*view);
-	}
-
-	wl_array_release(&views);
 }
 
 void
@@ -1242,6 +1339,10 @@ void
 xwayland_server_finish(struct server *server)
 {
 	struct wlr_xwayland *xwayland = server->xwayland;
+	wl_list_remove(&server->xwayland_new_surface.link);
+	wl_list_remove(&server->xwayland_server_ready.link);
+	wl_list_remove(&server->xwayland_xwm_ready.link);
+
 	/*
 	 * Reset server->xwayland to NULL first to prevent callbacks (like
 	 * server_global_filter) from accessing it as it is destroyed

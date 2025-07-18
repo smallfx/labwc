@@ -12,6 +12,7 @@ enum window_switcher_field_content {
 	LAB_FIELD_TYPE_SHORT,
 	LAB_FIELD_IDENTIFIER,
 	LAB_FIELD_TRIMMED_IDENTIFIER,
+	LAB_FIELD_ICON,
 	LAB_FIELD_DESKTOP_ENTRY_NAME,
 	LAB_FIELD_TITLE,
 	LAB_FIELD_TITLE_SHORT,
@@ -44,9 +45,6 @@ void osd_begin(struct server *server, enum lab_cycle_dir direction);
 /* Cycle the selected view in the window switcher */
 void osd_cycle(struct server *server, enum lab_cycle_dir direction);
 
-/* Updates onscreen display 'alt-tab' buffer */
-void osd_update(struct server *server);
-
 /* Closes the OSD */
 void osd_finish(struct server *server);
 
@@ -61,7 +59,7 @@ void osd_field_get_content(struct window_switcher_field *field,
 struct window_switcher_field *osd_field_create(void);
 void osd_field_arg_from_xml_node(struct window_switcher_field *field,
 	const char *nodename, const char *content);
-bool osd_field_validate(struct window_switcher_field *field);
+bool osd_field_is_valid(struct window_switcher_field *field);
 void osd_field_free(struct window_switcher_field *field);
 
 #endif // LABWC_OSD_H

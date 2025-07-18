@@ -48,32 +48,21 @@ lab_wlr_scene_get_prev_node(struct wlr_scene_node *node)
  */
 static void
 scene_output_damage(struct wlr_scene_output *scene_output,
-		const pixman_region32_t *region)
+		const pixman_region32_t *damage)
 {
-	if (!wlr_damage_ring_add(&scene_output->damage_ring, region)) {
-		return;
-	}
-
 	struct wlr_output *output = scene_output->output;
-	enum wl_output_transform transform =
-		wlr_output_transform_invert(scene_output->output->transform);
 
-	int width = output->width;
-	int height = output->height;
-	if (transform & WL_OUTPUT_TRANSFORM_90) {
-		width = output->height;
-		height = output->width;
+	pixman_region32_t clipped;
+	pixman_region32_init(&clipped);
+	pixman_region32_intersect_rect(&clipped, damage, 0, 0, output->width, output->height);
+
+	if (pixman_region32_not_empty(&clipped)) {
+		wlr_damage_ring_add(&scene_output->damage_ring, &clipped);
+		pixman_region32_union(&scene_output->WLR_PRIVATE.pending_commit_damage,
+			&scene_output->WLR_PRIVATE.pending_commit_damage, &clipped);
 	}
 
-	pixman_region32_t frame_damage;
-	pixman_region32_init(&frame_damage);
-	wlr_region_transform(&frame_damage, region, transform, width, height);
-
-	pixman_region32_union(&scene_output->pending_commit_damage,
-		&scene_output->pending_commit_damage, &frame_damage);
-	pixman_region32_intersect_rect(&scene_output->pending_commit_damage,
-		&scene_output->pending_commit_damage, 0, 0, output->width, output->height);
-	pixman_region32_fini(&frame_damage);
+	pixman_region32_fini(&clipped);
 }
 
 /*
@@ -98,8 +87,7 @@ lab_wlr_scene_output_commit(struct wlr_scene_output *scene_output,
 	 * rendering on every output commit and overloads CPU.
 	 * We also need to verify the necessity of wants_magnification.
 	 */
-	if (!wlr_output->needs_frame && !pixman_region32_not_empty(
-			&scene_output->pending_commit_damage) && !wants_magnification) {
+	if (!wlr_scene_output_needs_frame(scene_output) && !wants_magnification) {
 		return true;
 	}
 
@@ -116,14 +104,14 @@ lab_wlr_scene_output_commit(struct wlr_scene_output *scene_output,
 	}
 
 	struct wlr_box additional_damage = {0};
-	if (state->buffer && is_magnify_on()) {
-		magnify(output, state->buffer, &additional_damage);
+	if (state->buffer && magnifier_is_enabled()) {
+		magnifier_draw(output, state->buffer, &additional_damage);
 	}
 
 	bool committed = wlr_output_commit_state(wlr_output, state);
 	/*
-	 * Handle case where the ouput state test for tearing succeeded,
-	 * but actual commit failed. Retry wihout tearing.
+	 * Handle case where the output state test for tearing succeeded,
+	 * but actual commit failed. Retry without tearing.
 	 */
 	if (!committed && state->tearing_page_flip) {
 		state->tearing_page_flip = false;

@@ -74,11 +74,31 @@ char *str_join(const char *const parts[],
 bool str_endswith(const char *const string, const char *const suffix);
 
 /**
+ * str_endswith_ignore_case - indicate whether a string ends with a given suffix
+ * @string: string to test
+ * @suffix: suffix to expect in string
+ *
+ * If suffix is "" or NULL, this method always returns true; otherwise, this
+ * method returns true if and only if the full suffix exists at the end of the
+ * string.
+ */
+bool str_endswith_ignore_case(const char *const string, const char *const suffix);
+
+/**
  * str_starts_with - indicate whether a string starts with a given character
  * @string: string to test
  * @needle: character to expect in string
  * @ignore_chars: characters to ignore at start such as space and "\t"
  */
 bool str_starts_with(const char *s, char needle, const char *ignore_chars);
+
+/**
+ * str_equal - indicate whether two strings are identical
+ * @a: first string to compare
+ * @b: second string to compare
+ *
+ * If both strings are NULL, returns true.
+ */
+bool str_equal(const char *a, const char *b);
 
 #endif /* LABWC_STRING_HELPERS_H */

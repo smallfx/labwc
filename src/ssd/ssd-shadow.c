@@ -26,25 +26,21 @@ never_accepts_input(struct wlr_scene_buffer *buffer, double *sx, double *sy)
 /*
  * Setup transform and scale for shadow corner buffers. Cropping is applied if
  * the window is short or narrow enough that corners would overlap, the amount
- * to crop is controlled by vertical_overlap and horizontal_overlap.  Cropping
- * is applied before rotation so switch_axes should be true for the bottom-left
- * and top-right corners to crop horizontally instead of vertically.
+ * to crop is controlled by vertical_overlap and horizontal_overlap.
  */
 static void
 corner_scale_crop(struct wlr_scene_buffer *buffer, int horizontal_overlap,
-		int vertical_overlap, int corner_size, bool switch_axes)
+		int vertical_overlap, int corner_size)
 {
-	int width = corner_size - horizontal_overlap;
-	int height = corner_size - vertical_overlap;
-	/* Crop is applied before rotation so gets the axis flip */
+	int width = MAX(corner_size - horizontal_overlap, 0);
+	int height = MAX(corner_size - vertical_overlap, 0);
 	struct wlr_fbox src_box = {
-		.x = switch_axes ? vertical_overlap : horizontal_overlap,
-		.y = switch_axes ? horizontal_overlap : vertical_overlap,
-		.width = switch_axes ? height : width,
-		.height = switch_axes ? width : height,
+		.x = horizontal_overlap,
+		.y = vertical_overlap,
+		.width = width,
+		.height = height,
 	};
 	wlr_scene_buffer_set_source_box(buffer, &src_box);
-	/* But scaling is applied after rotation so no axis flip */
 	wlr_scene_buffer_set_dest_size(buffer, width, height);
 }
 
@@ -61,7 +57,7 @@ set_shadow_part_geometry(struct ssd_part *part, int width, int height,
 		wlr_scene_buffer_from_node(part->node);
 	/*
 	 * If the shadow inset is greater than half the overall window height
-	 * or width (eg. becaused the window is shaded or because we have a
+	 * or width (eg. because the window is shaded or because we have a
 	 * small window with massive shadows) then the corners would overlap
 	 * which looks horrible.  To avoid this, when the window is too narrow
 	 * or short we hide the edges on that axis and clip off the portion of
@@ -103,35 +99,35 @@ set_shadow_part_geometry(struct ssd_part *part, int width, int height,
 		y = -titlebar_height + height - inset + vertical_overlap;
 		wlr_scene_node_set_position(part->node, x, y);
 		corner_scale_crop(scene_buf, horizontal_overlap,
-			vertical_overlap, corner_size, false);
+			vertical_overlap, corner_size);
 		break;
 	case LAB_SSD_PART_CORNER_BOTTOM_LEFT:
 		x = -visible_shadow_width;
 		y = -titlebar_height + height - inset + vertical_overlap;
 		wlr_scene_node_set_position(part->node, x, y);
 		corner_scale_crop(scene_buf, horizontal_overlap,
-			vertical_overlap, corner_size, true);
+			vertical_overlap, corner_size);
 		break;
 	case LAB_SSD_PART_CORNER_TOP_LEFT:
 		x = -visible_shadow_width;
 		y = -titlebar_height - visible_shadow_width;
 		wlr_scene_node_set_position(part->node, x, y);
 		corner_scale_crop(scene_buf, horizontal_overlap,
-			vertical_overlap, corner_size, false);
+			vertical_overlap, corner_size);
 		break;
 	case LAB_SSD_PART_CORNER_TOP_RIGHT:
 		x = width - inset + horizontal_overlap;
 		y = -titlebar_height - visible_shadow_width;
 		wlr_scene_node_set_position(part->node, x, y);
 		corner_scale_crop(scene_buf, horizontal_overlap,
-			vertical_overlap, corner_size, true);
+			vertical_overlap, corner_size);
 		break;
 	case LAB_SSD_PART_RIGHT:
 		x = width;
 		y = -titlebar_height + inset;
 		wlr_scene_node_set_position(part->node, x, y);
 		wlr_scene_buffer_set_dest_size(
-			scene_buf, visible_shadow_width, height - 2 * inset);
+			scene_buf, visible_shadow_width, MAX(height - 2 * inset, 0));
 		wlr_scene_node_set_enabled(part->node, show_sides);
 		break;
 	case LAB_SSD_PART_BOTTOM:
@@ -139,7 +135,7 @@ set_shadow_part_geometry(struct ssd_part *part, int width, int height,
 		y = -titlebar_height + height;
 		wlr_scene_node_set_position(part->node, x, y);
 		wlr_scene_buffer_set_dest_size(
-			scene_buf, width - 2 * inset, visible_shadow_width);
+			scene_buf, MAX(width - 2 * inset, 0), visible_shadow_width);
 		wlr_scene_node_set_enabled(part->node, show_topbottom);
 		break;
 	case LAB_SSD_PART_LEFT:
@@ -147,7 +143,7 @@ set_shadow_part_geometry(struct ssd_part *part, int width, int height,
 		y = -titlebar_height + inset;
 		wlr_scene_node_set_position(part->node, x, y);
 		wlr_scene_buffer_set_dest_size(
-			scene_buf, visible_shadow_width, height - 2 * inset);
+			scene_buf, visible_shadow_width, MAX(height - 2 * inset, 0));
 		wlr_scene_node_set_enabled(part->node, show_sides);
 		break;
 	case LAB_SSD_PART_TOP:
@@ -155,7 +151,7 @@ set_shadow_part_geometry(struct ssd_part *part, int width, int height,
 		y = -titlebar_height - visible_shadow_width;
 		wlr_scene_node_set_position(part->node, x, y);
 		wlr_scene_buffer_set_dest_size(
-			scene_buf, width - 2 * inset, visible_shadow_width);
+			scene_buf, MAX(width - 2 * inset, 0), visible_shadow_width);
 		wlr_scene_node_set_enabled(part->node, show_topbottom);
 		break;
 	default:
@@ -259,15 +255,14 @@ ssd_shadow_create(struct ssd *ssd)
 		corner_bottom_buffer = &theme->window[active].shadow_corner_bottom->base;
 		edge_buffer = &theme->window[active].shadow_edge->base;
 
-		make_shadow(&subtree->parts,
-			LAB_SSD_PART_CORNER_BOTTOM_RIGHT, parent,
-			corner_bottom_buffer, WL_OUTPUT_TRANSFORM_NORMAL);
+		make_shadow(&subtree->parts, LAB_SSD_PART_CORNER_BOTTOM_RIGHT,
+			parent, corner_bottom_buffer, WL_OUTPUT_TRANSFORM_NORMAL);
 		make_shadow(&subtree->parts, LAB_SSD_PART_CORNER_BOTTOM_LEFT,
-			parent, corner_bottom_buffer, WL_OUTPUT_TRANSFORM_90);
+			parent, corner_bottom_buffer, WL_OUTPUT_TRANSFORM_FLIPPED);
 		make_shadow(&subtree->parts, LAB_SSD_PART_CORNER_TOP_LEFT,
 			parent, corner_top_buffer, WL_OUTPUT_TRANSFORM_180);
 		make_shadow(&subtree->parts, LAB_SSD_PART_CORNER_TOP_RIGHT,
-			parent, corner_top_buffer, WL_OUTPUT_TRANSFORM_270);
+			parent, corner_top_buffer, WL_OUTPUT_TRANSFORM_FLIPPED_180);
 		make_shadow(&subtree->parts, LAB_SSD_PART_RIGHT, parent,
 			edge_buffer, WL_OUTPUT_TRANSFORM_NORMAL);
 		make_shadow(&subtree->parts, LAB_SSD_PART_BOTTOM, parent,
@@ -289,9 +284,19 @@ ssd_shadow_update(struct ssd *ssd)
 	assert(ssd->shadow.tree);
 
 	struct view *view = ssd->view;
+	struct theme *theme = ssd->view->server->theme;
 	bool maximized = view->maximized == VIEW_AXIS_BOTH;
-	bool show_shadows =
-		rc.shadows_enabled && !maximized && !view_is_tiled(ssd->view);
+	bool tiled_shadows = false;
+	if (rc.shadows_on_tiled) {
+		if (rc.gap >= theme->window[THEME_ACTIVE].shadow_size
+				&& rc.gap >= theme->window[THEME_INACTIVE].shadow_size) {
+			tiled_shadows = true;
+		} else {
+			wlr_log(WLR_INFO, "gap size < shadow_size, ignore rc.shadows_ontiled");
+		}
+	};
+	bool show_shadows = rc.shadows_enabled && !maximized
+		&& (!view_is_tiled(ssd->view) || tiled_shadows);
 	wlr_scene_node_set_enabled(&ssd->shadow.tree->node, show_shadows);
 	if (show_shadows) {
 		set_shadow_geometry(ssd);
